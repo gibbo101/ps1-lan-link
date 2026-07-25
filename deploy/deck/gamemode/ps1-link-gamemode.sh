@@ -57,19 +57,27 @@ PAD_ID="${PAD_ID:-0}"
 FULLSCREEN="${FULLSCREEN:-1}"
 CTL="${CTL_ENV:-${CTL:-1}}"   # set 0 to leave the HTTP control surface off
 
-die() { echo "[gm] ERROR: $*"; exit 1; }
+# Errors go to stderr, not stdout: resolve_game runs inside a command substitution, and a message on
+# stdout there is captured into the variable instead of reaching the player.
+die() { echo "[gm] ERROR: $*" >&2; exit 1; }
 [ -x "$BIN" ] || die "emulator missing: $BIN"
 [ -f "$BIOS" ] || die "BIOS missing: $BIOS"
 [ -n "$GAME" ] || die "no game given and none set in $CONF"
 
-echo "[gm] binary md5: $(md5sum "$DIR/emu/squashfs-root/usr/bin/pcsx-redux" 2>/dev/null | cut -d' ' -f1)"
+# Hash what actually runs. Reporting a different path only agrees while AppRun stays a symlink, and
+# this line exists precisely to prove which build ran.
+echo "[gm] binary md5: $(md5sum "$(readlink -f "$BIN")" 2>/dev/null | cut -d' ' -f1)"
 
 # A cue sheet is required; these images are single-track MODE2/2352, the PS1 norm.
 make_cue() {
   local bin="$1" cue="$2" sz
   sz=$(stat -c%s "$bin")
   [ $((sz % 2352)) -eq 0 ] || die "$(basename "$bin") is not a multiple of 2352 bytes — unknown layout"
-  printf 'FILE "%s" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n' "$bin" > "$cue"
+  mkdir -p "$(dirname "$cue")" || die "cannot create $(dirname "$cue")"
+  # A failed write here would otherwise be reported as a generated cue, and the missing file would
+  # not surface until the emulator failed to open it.
+  printf 'FILE "%s" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n' "$bin" > "$cue" \
+    || die "could not write $cue"
   echo "[gm] generated $(basename "$cue")"
 }
 
@@ -95,15 +103,16 @@ echo "[gm] game: $(basename "$CUE")"
 
 # A survivor from a previous run keeps port 6699, so the new server fails to bind and the new client
 # links to the stale process instead — a mixed pair with no warning. Refuse to start until it is free.
-pkill -x AppRun 2>/dev/null
-pkill -x pcsx-redux 2>/dev/null
+# Matched on our own binary's path rather than the process name: every AppImage on the system runs
+# as "AppRun", so killing by name would take unrelated applications with it.
+pkill -f "$BIN" 2>/dev/null
 for _ in $(seq 1 40); do
-  pgrep -x AppRun >/dev/null || pgrep -x pcsx-redux >/dev/null || break
+  pgrep -f "$BIN" >/dev/null || break
   sleep 0.25
 done
-if pgrep -x AppRun >/dev/null || pgrep -x pcsx-redux >/dev/null; then
+if pgrep -f "$BIN" >/dev/null; then
   echo "[gm] instances ignored SIGTERM; escalating"
-  pkill -9 -x AppRun 2>/dev/null; pkill -9 -x pcsx-redux 2>/dev/null
+  pkill -9 -f "$BIN" 2>/dev/null
   sleep 2
 fi
 ss -tln 2>/dev/null | grep -q ":$PORT " && die "port $PORT still held — refusing to start a mixed pair"
@@ -193,8 +202,8 @@ cleanup() {
     sleep 0.25
   done
   for p in $PID_B $PID_A; do kill -9 "$p" 2>/dev/null; done
-  pkill -x AppRun 2>/dev/null
-  echo "[gm] exit: $(pgrep -x AppRun | wc -l) AppRun processes left, port $PORT held: $(ss -tln 2>/dev/null | grep -c ":$PORT ")"
+  pkill -f "$BIN" 2>/dev/null
+  echo "[gm] exit: $(pgrep -cf "$BIN") emulator processes left, port $PORT held: $(ss -tln 2>/dev/null | grep -c ":$PORT ")"
 }
 trap cleanup EXIT INT TERM
 
@@ -276,5 +285,14 @@ if [ "$CTL" = 1 ]; then
 fi
 echo "[gm] running — this script exits when instA does"
 
-# instA's lifetime is the game's lifetime; instB is torn down with it by the trap.
+# instA's lifetime is the game's lifetime; instB is torn down with it by the trap. instB is watched
+# too, because if it dies the link is gone and the game still looks fine — the player would be left
+# in a session that can never sync, with nothing said about why.
+while kill -0 "$PID_A" 2>/dev/null; do
+  if ! kill -0 "$PID_B" 2>/dev/null; then
+    echo "[gm] WARNING: instB exited — the link is dead; see $GM/instB/run.log"
+    break
+  fi
+  sleep 2
+done
 wait "$PID_A"

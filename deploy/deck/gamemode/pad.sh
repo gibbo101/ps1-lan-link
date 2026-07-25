@@ -26,8 +26,10 @@ api() { curl -fsS --max-time 5 "http://$HOST:$PORT/api/v1$1"; }
 
 case "${1:-}" in
   release) api "/lua/release"; exit ;;
-  hold)    api "/lua/pad?button=$2&state=down"; exit ;;
-  shot)    curl -fsS --max-time 15 -o "$2" "http://$HOST:$PORT/api/v1/screen/still" && echo "saved $2"; exit ;;
+  hold)    [ -n "${2:-}" ] || { echo "usage: pad.sh <A|B> hold <button>" >&2; exit 1; }
+           api "/lua/pad?button=$2&state=down"; exit ;;
+  shot)    [ -n "${2:-}" ] || { echo "usage: pad.sh <A|B> shot <file.png>" >&2; exit 1; }
+           curl -fsS --max-time 15 -o "$2" "http://$HOST:$PORT/api/v1/screen/still" && echo "saved $2"; exit ;;
 esac
 
 # A tap has to span at least a couple of emulated frames or the game never samples it.

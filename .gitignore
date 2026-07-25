@@ -1,6 +1,5 @@
-# Anchored to the repo root on purpose: an unanchored `pcsx-redux/` also matched
-# deploy/deck/home/.config/pcsx-redux/, which silently kept the launcher's config template out of
-# the repo and left a fresh clone unable to generate per-instance configs at all.
+# Leading slashes are load-bearing: these rules must match only the repo root, never a directory of
+# the same name nested under deploy/.
 
 # Disc images, BIOS and extracted executables — copyrighted and multi-GB.
 /work/

@@ -284,7 +284,8 @@ so any title with link-cable support should work. What is currently hardcoded is
 and the per-instance config, so the work is:
 
 - a **game picker** over a ROM directory (the Deck's RetroDeck library lives at
-  `/run/media/deck/*/retrodeck/roms/psx/`), feeding the chosen disc to both instances
+  `~/retrodeck/roms/psx` on this Deck — an SD-card install would sit under `/run/media/` instead),
+  feeding the chosen disc to both instances
 - **`.ecm` handling** — RetroDeck stores discs ECM-compressed and **PCSX-Redux cannot load `.ecm`**;
   either decode on selection or filter those entries out with a clear message
 - generated per-instance configs (server/client on loopback, one gamepad each) instead of the
