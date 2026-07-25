@@ -27,6 +27,14 @@ for f in "$BIN" "$BIOS" "$CUE"; do
   [ -e "$f" ] || { echo "MISSING: $f — run setup.sh first"; exit 1; }
 done
 
+# The emulator binds its listeners to loopback, because it accepts anything that reaches them and
+# re-points the link at the newest connection. This launcher is the one case whose peer is on
+# another machine, so a server here has to listen on an address that peer can reach.
+if [ "$ROLE" = server ]; then
+  export PCSX_BIND_ADDRESS="${BIND_ADDRESS:-0.0.0.0}"
+  echo "[ps1-link] server: listening on $PCSX_BIND_ADDRESS:$PORT for the remote client"
+fi
+
 # Link stall tuning → env the emulator reads at runtime (no rebuild to retune).
 [ -n "${STALL_US:-}" ] && export PCSX_LINK_STALL_US="$STALL_US"
 [ -n "${POLL_CYCLES:-}" ] && export PCSX_LINK_POLL_CYCLES="$POLL_CYCLES"

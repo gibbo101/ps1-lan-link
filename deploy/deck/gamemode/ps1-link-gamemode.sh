@@ -24,20 +24,19 @@ BIOS="$DIR/bios/scph7001.bin"
 ROMS="$DIR/roms"
 LIB="${LIB:-$HOME/retrodeck/roms/psx}"
 
-# SIO1 link. Only loopback is ever *used* — the client dials 127.0.0.1 — but the emulator's
-# listener hardcodes 0.0.0.0 (upstream `UvFifoListener::start`), and it re-points the link at any
-# later connection, so a peer on the LAN can displace instB mid-match. Confining this needs an
-# upstream bind-address setting; until then it is exposure we carry knowingly.
+# SIO1 link, loopback only: the client dials 127.0.0.1 and the listener binds it too. That bind
+# matters because the listener re-points the link at any later connection, so a listener on a
+# routable address would let a host on the LAN displace instB mid-match.
 PORT=6699
 # Control surface. Kept next to the link port and away from 8080/8081: Steam's own steamwebhelper
 # listens on 8080, and the emulator's web server fails to bind silently, so a collision looks like a
 # working launch with a dead control surface.
 #
-# SECURITY: this API is unauthenticated and also binds 0.0.0.0. Anyone who can reach the Deck can
-# read the screen, drive both pads, dump emulated RAM, and — via /api/v1/screen/save?filepath= —
-# overwrite any file this user can write. Requests are plain GETs with no CSRF token, so a web page
-# the Deck opens can fire them too. Only run this on a network you trust until the bind address is
-# patched to 127.0.0.1; CTL=0 disables it, at the cost of the start-together behaviour below.
+# SECURITY: this API is unauthenticated — it reads the screen, drives both pads, dumps emulated RAM
+# and, via /api/v1/screen/save?filepath=, writes any file this user can. It is confined to loopback
+# by the emulator patch, so reaching it means having access to this machine already; reach it from
+# elsewhere with an SSH tunnel, never by setting PCSX_BIND_ADDRESS to a routable address. CTL=0
+# turns it off entirely, at the cost of the start-together behaviour below.
 WEB_A=6680          # instA  control/verification surface
 WEB_B=6681          # instB  control/verification surface — the only way to drive a headless pad
 

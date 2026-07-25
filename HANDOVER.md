@@ -10,6 +10,16 @@ menu slowness, and the loopback story (session 4) for *how the link works*.
 
 ---
 
+## 🔒 Session 9 — every listener binds loopback
+
+`patches/loopback-bind-session9.patch`. The web server, the SIO1 listener and the GDB server all
+bound `0.0.0.0` upstream and none of them authenticate anything; they now bind `127.0.0.1` through
+`PCSX::Uv::makeBindAddress()` (`src/support/uvbind.h`), with `PCSX_BIND_ADDRESS` as the opt-out for
+the cross-machine peer scripts. Detail, measurements and what is still exposed are in
+"Security debts" below. **The Decks have not been updated** — deploy before treating this as done.
+
+---
+
 ## 🎉 Session 8 — GAME MODE WORKS. Stage 1 of the unified app is met.
 
 Read `docs/DESIGN-unified-app.md` first; this is the summary.
@@ -70,8 +80,9 @@ Also: the PC, Deck 1 and the shared AppImage were each carrying a **different** 
 
 ### Where the code lives now
 
-**`github.com/gibbo101/ps1-lan-link`, private.** Public later, once we are satisfied — see the
-security debts below, which are the gate. History was rewritten on 2026-07-25 to remove a password,
+**`github.com/gibbo101/ps1-lan-link`, private.** Public later, once we are satisfied — the security
+debts that gated it are fixed in the source (see below) but not yet on the Decks. History was
+rewritten on 2026-07-25 to remove a password,
 a family member's Steam account name and userdata id, and a tailnet address; every commit hash
 predating that differs from anything quoted in older notes.
 
@@ -79,25 +90,39 @@ The repo is registered in `~/.claude/dev_journey.md` (tracker `none`, base `main
 so `/status` and `/dev-code-review` work here. `/dev-code-review` only has branch-only mode, and
 that mode diffs against `origin/main` — now that a remote exists it works normally.
 
-### Security debts — the gate on going public
+### Security debts — cleared by the loopback bind patch (session 9)
 
-Both are upstream binds we cannot configure, and both are documented in the launcher itself:
+Both debts were upstream binds to `0.0.0.0`: the unauthenticated control API (6680/6681), which
+reads the screen, drives both pads, dumps emulated RAM and overwrites any file this user can write
+via `/api/v1/screen/save?filepath=`; and the SIO1 listener (6699), which re-points the link at any
+later connection, so a host on the LAN could displace instB mid-match.
 
-1. **The control API (6680/6681) is unauthenticated and binds `0.0.0.0`.** Anyone who can reach the
-   Deck can read the screen, drive both pads, dump emulated RAM, and overwrite **any file this user
-   can write** via `/api/v1/screen/save?filepath=`. Plain GETs with no CSRF token, so a web page the
-   Deck opens can fire them too. `CTL=0` disables it, at the cost of the start-together behaviour.
-2. **The SIO1 listener (6699) also binds `0.0.0.0`**, and re-points the link at *any* later
-   connection — a host on the LAN can displace instB mid-match. Only the client side is confined to
-   loopback.
+**`patches/loopback-bind-session9.patch` binds every listener to `127.0.0.1`** — the web server, the
+SIO1 listener (`UvFifoListener`) and the GDB server, which had the same bind and the same lack of
+authentication. `PCSX::Uv::makeBindAddress()` in the new `src/support/uvbind.h` is the single place
+that decides; `PCSX_BIND_ADDRESS` overrides it for the one case that genuinely needs a peer on
+another machine (`repro/run-server.sh`, and `ps1-link.sh` when `ROLE=server`), and a value that is
+not a valid IPv4 address falls back to loopback rather than leaving the socket unbound.
+
+Verified on the PC with the rebuilt binary (md5 `369523e845daa10500d30524e2c01082`): all three
+listeners come up on `127.0.0.1`, `PCSX_BIND_ADDRESS=0.0.0.0` puts all three back on `0.0.0.0`, a
+garbage value lands on loopback, and the Stage 1 launcher still reaches **2 link sockets and
+100.15% / 60.1 fps on both instances** with both control surfaces answering.
+
+**Remote access for development is now an SSH tunnel** (`ssh -L 6681:127.0.0.1:6681 deck@steamdeck`).
+`pad.sh` defaults to loopback, so it still works unchanged when run *on* a Deck; `HOST=steamdeck`
+from another machine no longer connects.
+
+**Deployed to both Decks and played.** Both now run md5 `369523e845daa10500d30524e2c01082` — Deck 2
+was two builds behind (`5d496f64…`, session 6) and had the same exposure, and its previous launcher
+is kept as `ps1-link-netpeer.sh`. Launched from Deck 1's Game Mode library: link sockets 2, all three
+listeners on `127.0.0.1`, both instances at 100.0% / 60 fps, both pads visible to Steam Input, and
+**The tester played a linked match — "running fine", with the familiar menu slowdown and full-speed
+gameplay.** The menu dip is session 6's idle-poll cost, not this patch.
 
 ### Next
 
-**Do the bind-address patch first.** Stage 2 requires patching the emulator anyway, and everything
-the launcher needs is local, so binding both listeners to `127.0.0.1` costs one patch and clears
-both debts. Remote access for development becomes an SSH tunnel.
-
-Then Stage 2 proper — bespoke streaming: instB's video and audio to the joiner, controller input
+Stage 2 proper — bespoke streaming: instB's video and audio to the joiner, controller input
 back. Input is a hard requirement rather than an option, because a headless instB has no GLFW at
 all. Pad overrides are the mechanism and `takeScreenShot()` is the frame source; HTTP is the
 prototype, not the transport.

@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Launch ONE desktop-side PCSX-Redux as the SIO1 server (listens 0.0.0.0:6699) for a
-# real-network link test against a remote client (Steam Deck over Tailscale/LAN).
+# Launch ONE desktop-side PCSX-Redux as the SIO1 server (:6699) for a real-network link test against
+# a remote client (Steam Deck over Tailscale/LAN).
+#
+# Listeners now bind loopback, so a remote client cannot reach this one unless PCSX_BIND_ADDRESS is
+# set to a routable address. That is deliberate — the emulator's listeners are unauthenticated — and
+# it is exported here rather than in the emulator's default because this script is the one case that
+# genuinely needs a peer on another machine.
 set -euo pipefail
+export PCSX_BIND_ADDRESS="${PCSX_BIND_ADDRESS:-0.0.0.0}"
 PD="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$PD/work/emu/squashfs-root/AppRun"
 BIOS="$PD/work/bios/scph7001.bin"

@@ -82,7 +82,7 @@ The emulator already ships what stage 2 needs in prototype form, and it works he
 
 | | |
 |---|---|
-| `-webserver -webserver-port N` | HTTP API, bound `0.0.0.0` |
+| `-webserver -webserver-port N` | HTTP API, bound `127.0.0.1` (patched; upstream binds `0.0.0.0`) |
 | `GET /api/v1/screen/still` | PNG of the emulated screen, straight from `m_gpu->takeScreenShot()` |
 | `-dofile x.lua` + `GET /api/v1/lua/<name>` | calls `PCSX.WebServer.Handlers.<name>` |
 | `PCSX.SIO0.slots[1].pads[1].setOverride(bit)` | forces a button; ANDed into `buttonStatus` on every read, so it works with no pad and no GLFW |
@@ -100,6 +100,13 @@ PNG-per-frame over HTTP is far too slow to be the stage 2 transport, but the two
 **Trap: Steam's `steamwebhelper` listens on `127.0.0.1:8080`,** and the emulator's web server gives
 up *silently* when it cannot bind. A collision looks like a clean launch with a dead control surface.
 The launcher uses 6680/6681 and pings both after startup.
+
+This control surface authenticates nothing and can write files, so it is confined to loopback by
+`patches/loopback-bind-session9.patch` — everything Stage 1 drives is local, and development from
+another machine goes through an SSH tunnel. Stage 2's transport is the first thing in this project
+that *has* to accept a connection from the LAN, so it needs its own answer to that question rather
+than inheriting this one: the stream endpoint should carry only frames, audio and pad input, and
+must not become a second route to the emulator's Lua and memory APIs.
 
 ## Staging
 

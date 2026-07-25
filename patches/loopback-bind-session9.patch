@@ -1,0 +1,125 @@
+diff --git a/src/core/gdb-server.cc b/src/core/gdb-server.cc
+index b9d570a2..5eaf47a8 100644
+--- a/src/core/gdb-server.cc
++++ b/src/core/gdb-server.cc
+@@ -31,6 +31,7 @@
+ #include "core/system.h"
+ #include "fmt/format.h"
+ #include "support/strings-helpers.h"
++#include "support/uvbind.h"
+ 
+ const char PCSX::GdbClient::toHex[] = "0123456789ABCDEF";
+ 
+@@ -61,7 +62,7 @@ void PCSX::GdbServer::startServer(uv_loop_t* loop, int port) {
+     m_server.data = this;
+ 
+     struct sockaddr_in bindAddr;
+-    int result = uv_ip4_addr("0.0.0.0", port, &bindAddr);
++    int result = Uv::makeBindAddress(port, &bindAddr);
+     if (result != 0) {
+         uv_close(reinterpret_cast<uv_handle_t*>(&m_server), closeCB);
+         return;
+diff --git a/src/core/web-server.cc b/src/core/web-server.cc
+index 292abb35..f5dd7a90 100644
+--- a/src/core/web-server.cc
++++ b/src/core/web-server.cc
+@@ -43,6 +43,7 @@
+ #include "support/file.h"
+ #include "support/hashtable.h"
+ #include "support/strings-helpers.h"
++#include "support/uvbind.h"
+ #include "supportpsx/iso9660-builder.h"
+ #include "uriparser/Uri.h"
+ 
+@@ -831,7 +832,7 @@ void PCSX::WebServer::startServer(uv_loop_t* loop, int port) {
+     m_server.data = this;
+ 
+     struct sockaddr_in bindAddr;
+-    int result = uv_ip4_addr("0.0.0.0", port, &bindAddr);
++    int result = Uv::makeBindAddress(port, &bindAddr);
+     if (result != 0) {
+         uv_close(reinterpret_cast<uv_handle_t*>(&m_server), closeCB);
+         return;
+diff --git a/src/support/uvbind.h b/src/support/uvbind.h
+new file mode 100644
+index 00000000..8ebabe7b
+--- /dev/null
++++ b/src/support/uvbind.h
+@@ -0,0 +1,55 @@
++/*
++
++MIT License
++
++Copyright (c) 2026 PCSX-Redux authors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++*/
++
++#pragma once
++
++#include <uv.h>
++
++#include <cstdlib>
++
++namespace PCSX {
++
++namespace Uv {
++
++inline constexpr const char* c_loopbackAddress = "127.0.0.1";
++
++// Fills `addr` with the address every listening socket in the emulator binds to, and returns the
++// libuv result code. The web server, the GDB server and the SIO1 link listener all accept anything
++// that reaches them — they can read and write emulated memory, drive the pads, and write files —
++// so reaching them has to require access to the machine itself. Hence loopback by default.
++// PCSX_BIND_ADDRESS opts a trusted setup back out to a wider interface; a value that is not a valid
++// IPv4 address falls back to loopback rather than leaving the socket unbound.
++inline int makeBindAddress(unsigned port, sockaddr_in* addr) {
++    const char* host = std::getenv("PCSX_BIND_ADDRESS");
++    if ((host == nullptr) || (host[0] == 0)) host = c_loopbackAddress;
++    int result = uv_ip4_addr(host, port, addr);
++    if (result != 0) result = uv_ip4_addr(c_loopbackAddress, port, addr);
++    return result;
++}
++
++}  // namespace Uv
++
++}  // namespace PCSX
+diff --git a/src/support/uvfile.cc b/src/support/uvfile.cc
+index 2a14a6e9..8a6cb656 100644
+--- a/src/support/uvfile.cc
++++ b/src/support/uvfile.cc
+@@ -30,6 +30,8 @@ SOFTWARE.
+ #include <cstdint>
+ #include <exception>
+ 
++#include "support/uvbind.h"
++
+ struct CurlContext {
+     CurlContext(curl_socket_t sockfd, uv_loop_t *loop) : sockfd(sockfd) {
+         uv_poll_init_socket(loop, &poll_handle, sockfd);
+@@ -942,7 +948,7 @@ void PCSX::UvFifoListener::start(unsigned port, uv_loop_t *loop, uv_async_t *asy
+         m_server.data = this;
+ 
+         struct sockaddr_in bindAddr;
+-        int result = uv_ip4_addr("0.0.0.0", port, &bindAddr);
++        int result = Uv::makeBindAddress(port, &bindAddr);
+         if (result != 0) {
+             uv_close(reinterpret_cast<uv_handle_t *>(&m_server), [](uv_handle_t *handle) {});
+             return;

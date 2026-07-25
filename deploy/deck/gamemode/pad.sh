@@ -10,6 +10,10 @@
 #        pad.sh <A|B> shot <file.png>    save the emulated screen
 #
 # Buttons: select start up down left right cross circle square triangle l1 l2 r1 r2
+#
+# The control surface listens on loopback only, so driving a Deck from another machine means
+# tunnelling to it first — `ssh -L 6681:127.0.0.1:6681 deck@steamdeck`, then run this locally with
+# the default HOST. Pointing HOST at the Deck's own address will not connect.
 set -uo pipefail
 
 HOST="${HOST:-127.0.0.1}"
