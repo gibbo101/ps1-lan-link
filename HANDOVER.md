@@ -14,10 +14,25 @@ menu slowness, and the loopback story (session 4) for *how the link works*.
 
 Read `docs/DESIGN-unified-app.md` first; this is the summary.
 
-**A single Steam-library entry in Game Mode now runs both sides of a link game** — instA fullscreen
-and driven by the Deck's own controller, instB invisible, link on loopback, both at ~100% / 60 fps.
-Verified live on 2026-07-25: the tester reached `WAITING TO CONNECT` and then the match-options screen on
-instA while instB was driven to `COUNTRY/COLOR` over HTTP from the PC at the same time.
+**A single Steam-library entry in Game Mode now runs both sides of a link game, and the tester played a
+real linked match through it on 2026-07-25.** instA fullscreen and driven by the Deck's own
+controller; instB invisible and driven over HTTP from the PC; link on loopback. His verdict:
+*"worked nicely!"*
+
+Measured across the whole session (`docs/session8-evidence/`, 148 samples per side):
+
+| Phase | instA | instB |
+|---|---|---|
+| Boot + menus | 100.0% / 60.0 fps | 100.0% / 60.0 fps |
+| Link handshake (~10 s) | 60.5–85.6%, median 61.4% | 100.0% |
+| **Gameplay** | **100.1% / 60.1 fps** | **97.1% / 58.3 fps** |
+
+The handshake dip is confined to instA — instB never sees it. That is the opposite of the symmetric
+collapse every networked attempt produced in sessions 5–7.
+
+**Both run logs end in a sample that looks like a crash** (instB: 30% / 18 fps, stalling 96% of
+wall). That is teardown: instA is killed first and instB spends its last seconds stalling on a dead
+peer. Do not quote the final line as a result.
 
 **The unlock was `pcsx-redux -no-ui`.** It swaps the GUI for `PCSX::TUI` — no window, no GL context,
 no GLFW, no terminal — so gamescope has exactly one app to composite. Every session-7 problem about
