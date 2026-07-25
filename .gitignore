@@ -1,6 +1,18 @@
 # Disc images, BIOS and extracted executables — copyrighted and multi-GB.
 work/
 
+# BIOS and discs are never redistributable, wherever they happen to land. Matching by extension as
+# well as by directory means a stray image cannot be swept in by `git add -A`.
+bios/
+roms/
+*.bin
+*.img
+*.iso
+*.cue
+*.ecm
+*.mcd
+*.AppImage
+
 # Upstream clone with its own history, plus build output. Our changes live in patches/.
 pcsx-redux/
 
