@@ -191,9 +191,21 @@ launch() {  # $1 = instA|instB, rest = extra args
   local D="$GM/$inst"
   : > "$D/run.log"
   env HOME="$D" XDG_CONFIG_HOME="$D/.config" \
-    stdbuf -o0 -e0 "$BIN" -stdout -bios "$BIOS" -iso "$CUE" -run "$@" \
+    stdbuf -o0 -e0 "$BIN" -stdout -bios "$BIOS" -iso "$CUE" "${RUN_ARGS[@]}" "$@" \
     > "$D/run.log" 2>&1 &
   LAUNCHED_PID=$!
+}
+
+# Retaliation builds its main menu once, and LINK GAME is only on it if the peer was already
+# connected. Whichever side boots first therefore reaches a menu with no LINK GAME entry, however
+# healthy the link is. Starting both paused and resuming them only once the socket is up means
+# neither side can get there early. Without a control surface there is no way to resume, so that
+# case keeps the old behaviour and accepts the race.
+RUN_ARGS=(-run)
+[ "$CTL" = 1 ] && RUN_ARGS=()
+
+resume() {  # $1 = port
+  curl -fsS --max-time 5 -X POST "http://127.0.0.1:$1/api/v1/execution-flow?function=resume" >/dev/null 2>&1
 }
 
 CTL_ARGS=()
@@ -220,9 +232,10 @@ done
 echo "[gm] link sockets: $(ss -tn 2>/dev/null | grep -c ":$PORT ") (2 = connected)"
 echo "[gm] instA pid=$PID_A  instB pid=$PID_B (headless)"
 
-# The web server gives up quietly if its port is taken, and instB is undrivable without it, so say
-# so rather than leaving a dead control surface to be discovered later.
+# The web server gives up quietly if its port is taken. When the instances were started paused it is
+# also the only way to start them, so a dead surface is fatal rather than cosmetic.
 if [ "$CTL" = 1 ]; then
+  ctl_ok=1
   for pair in "instA:$WEB_A" "instB:$WEB_B"; do
     inst=${pair%%:*}; p=${pair##*:}
     if curl -fsS --max-time 3 "http://127.0.0.1:$p/api/v1/lua/ping" >/dev/null 2>&1; then
@@ -230,8 +243,22 @@ if [ "$CTL" = 1 ]; then
     else
       echo "[gm] WARNING: $inst control surface not answering on $p — port taken?"
       ss -tln 2>/dev/null | grep ":$p " || true
+      ctl_ok=0
     fi
   done
+
+  if [ "$ctl_ok" = 1 ]; then
+    echo "[gm] link is up — starting both sides together"
+    resume "$WEB_B" && resume "$WEB_A" || ctl_ok=0
+  fi
+
+  # Paused emulators that cannot be resumed are a black screen, so rather than leave the player
+  # with one, start over without the control surface and accept the menu race.
+  if [ "$ctl_ok" = 0 ]; then
+    echo "[gm] cannot resume — relaunching without the control surface"
+    cleanup
+    CTL=0 exec "$0" "$GAME"
+  fi
 fi
 echo "[gm] running — this script exits when instA does"
 
