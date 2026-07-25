@@ -57,6 +57,50 @@ export path to instB is a normal change, not a fork of something we do not contr
 `SwapBuffers` on instB to grab frames, the technique OBS-style game capture uses. Hackier, but no
 patch to maintain. Decide at stage 2.
 
+## What `-no-ui` settles (measured 2026-07-25, session 8)
+
+`pcsx-redux -no-ui` swaps the GUI for `PCSX::TUI` (`src/main/textui.cc`), a stub UI with **no window,
+no GL context, no GLFW and no terminal requirement**. Measured on the PC and again on the Deck: it
+boots the BIOS, runs the disc and holds the loopback SIO1 link at **100.1% / 60.1 fps**, identical to
+the GUI instance, while `xdotool search --class pcsx` finds exactly one window.
+
+**This deletes the Stage 1 blocker rather than answering it.** There is no second window for
+gamescope to composite, focus, or leak onto the screen, so none of the session-7 questions about
+hidden Xwayland roots or unfocusable instances apply. instB is simply not on screen.
+
+It also settles two things further down the plan:
+
+- **instB takes no controller input**, because there is no GLFW to read a pad. Steam Input handing
+  the same virtual pad to both instances — listed as a Stage 1 unknown — cannot happen. In exchange,
+  injecting the joiner's input into instB becomes a *requirement* of stage 2, not an option.
+- **The `LD_PRELOAD` variant is dead.** A headless instance never calls `SwapBuffers`, so there is
+  nothing to hook. The frame/audio export path has to be a patch, which is what we already build.
+
+### The control surface that makes a headless instance usable
+
+The emulator already ships what stage 2 needs in prototype form, and it works headless:
+
+| | |
+|---|---|
+| `-webserver -webserver-port N` | HTTP API, bound `0.0.0.0` |
+| `GET /api/v1/screen/still` | PNG of the emulated screen, straight from `m_gpu->takeScreenShot()` |
+| `-dofile x.lua` + `GET /api/v1/lua/<name>` | calls `PCSX.WebServer.Handlers.<name>` |
+| `PCSX.SIO0.slots[1].pads[1].setOverride(bit)` | forces a button; ANDed into `buttonStatus` on every read, so it works with no pad and no GLFW |
+
+Pad overrides are called with a **dot, not a colon** — the binding takes the button as its first
+argument, so an implicit `self` fails with "Invalid argument to setOverride".
+
+Proven end to end: a `-no-ui` instance was driven from the FMV to Retaliation's main menu over HTTP
+alone, and both sides then showed **LINK GAME** — the entry that only appears when the peer socket is
+connected. So the whole of Stage 1 is verifiable from SSH with nobody holding a controller.
+
+PNG-per-frame over HTTP is far too slow to be the stage 2 transport, but the two hooks it proves —
+`takeScreenShot()` for video and pad overrides for input — are the right ones.
+
+**Trap: Steam's `steamwebhelper` listens on `127.0.0.1:8080`,** and the emulator's web server gives
+up *silently* when it cannot bind. A collision looks like a clean launch with a dead control surface.
+The launcher uses 6680/6681 and pings both after startup.
+
 ## Staging
 
 ### Stage 1 — Game Mode viability (make-or-break, smallest useful step)
@@ -68,25 +112,50 @@ One app, launched from the Steam library in **Game Mode**, that:
 - lets the Deck's own controller drive instA,
 - exits cleanly, leaving nothing running.
 
-No streaming, no join mode, no UI yet. This answers the only question that can kill the project:
-**does Steam Input give our app a usable controller in Game Mode, and can instB run invisibly
-alongside without gamescope showing it?** The tester's hypothesis is that Game Mode fixes the controller
-problems that plague Desktop Mode; this tests it.
+No streaming, no join mode, no UI yet.
 
-Known unknowns to resolve here:
+**Built and deployed** as `deploy/deck/gamemode/` — `ps1-link-gamemode.sh` (launcher),
+`instb-ctl.lua` (headless control surface), `pad.sh` (drive either side from a shell),
+`install.sh` (hash-verified deploy). It takes over the existing "PS1 LAN Link" Steam shortcut so no
+`shortcuts.vdf` editing is needed; the previous target is kept as `ps1-link-netpeer.sh`.
 
-- Whether gamescope will run two instances with only the focused one presented (session 7 saw
-  instances render to gamescope's hidden Xwayland `:1` — invisible, which is what we now *want* for
-  instB, but they were also unfocusable and uncapturable).
-- Whether Steam Input presents one virtual pad to the whole session (both instances would then see
-  the same input) and whether our uinput pads are still needed for instB.
-- Whether a Steam shortcut can launch a script that spawns two processes and survives.
+Verified on the PC against a mirrored directory tree: both instances up, link socket ESTAB, **one
+window**, both sides showing LINK GAME, both at 100.1%, and a SIGTERM leaving no process and a free
+port. Verified on the Deck: the same binary, headless, at 100% with a live control surface.
+
+**Proven in Game Mode on the Deck, 2026-07-25.** Launched from the Steam library: instA fullscreen
+and visible, instB headless and invisible, link socket ESTAB, **both at ~100% / 60 fps**, the Deck's
+own controller driving instA (the tester reached `WAITING TO CONNECT` and then the match-options screen),
+and instB driven to `COUNTRY/COLOR` over HTTP from another machine at the same time. Game Mode is
+viable; the Sunshine/Moonlight stack is not needed for the host side.
+
+Two things had to be fixed to get there, both worth remembering:
+
+- **`virtual-pads.py` must not be running.** It is a Desktop Mode workaround, and in Game Mode it is
+  pure harm: its uinput pads occupy the low gamepad indices, so `PAD_ID=0` binds to a pad nobody is
+  holding and the Deck's own controls appear dead. Stopping the `ps1-pads` unit fixed the controller
+  *live*, without a relaunch — the emulator rescans on joystick hotplug. The launcher now stops it
+  and logs each gamepad against the `PAD_ID` that selects it.
+- **Windowless is not silent.** instB's SPU still opens an audio device, so the host hears both sides
+  at once. The launcher now sets `SPU.Mute` on instB. Stage 2 replaces this: instB's audio has to be
+  captured and sent, not discarded.
+
+The unknowns that needed Game Mode, and how they landed:
+
+- **Does Steam Input give instA a usable pad, and at which index?** Yes — Steam presents two virtual
+  X-Box 360 pads and `PAD_ID=0` is correct, *once the phantom pads are gone*. The tester's hypothesis that
+  Game Mode fixes the Desktop Mode controller problems holds.
+- **Does gamescope present instA cleanly fullscreen?** Yes.
+- **Does a Steam shortcut survive a script that spawns two processes?** Yes.
 
 ### Stage 2 — bespoke streaming
 
 instB's video and audio out over LAN; controller input back. Real risks: encode latency, audio sync,
 and CPU headroom on a Deck already running two emulators (measured: both instances hold 100% / 60 fps
 with software x264 encoding for one stream, load ~3.9 of 8 threads — encouraging but not proof).
+
+Input is no longer optional here: a headless instB has no GLFW, so the joiner's pad has to be
+injected. Pad overrides are the mechanism; the HTTP route is the prototype, not the transport.
 
 ### Stage 3 — the product
 

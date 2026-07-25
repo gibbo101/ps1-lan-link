@@ -10,6 +10,57 @@ menu slowness, and the loopback story (session 4) for *how the link works*.
 
 ---
 
+## 🎉 Session 8 — GAME MODE WORKS. Stage 1 of the unified app is met.
+
+Read `docs/DESIGN-unified-app.md` first; this is the summary.
+
+**A single Steam-library entry in Game Mode now runs both sides of a link game** — instA fullscreen
+and driven by the Deck's own controller, instB invisible, link on loopback, both at ~100% / 60 fps.
+Verified live on 2026-07-25: the tester reached `WAITING TO CONNECT` and then the match-options screen on
+instA while instB was driven to `COUNTRY/COLOR` over HTTP from the PC at the same time.
+
+**The unlock was `pcsx-redux -no-ui`.** It swaps the GUI for `PCSX::TUI` — no window, no GL context,
+no GLFW, no terminal — so gamescope has exactly one app to composite. Every session-7 problem about
+hidden Xwayland roots, `vkms`, portal capture and display capture simply does not arise. Sunshine and
+Moonlight are not needed for the host side.
+
+**What runs it:** `deploy/deck/gamemode/` — `ps1-link-gamemode.sh` (launcher), `instb-ctl.lua`
+(HTTP control surface), `pad.sh` (drive either side from a shell), `install.sh` (hash-verified
+deploy). It takes over the existing "PS1 LAN Link" Steam shortcut; the previous target is kept as
+`ps1-link-netpeer.sh`.
+
+**A headless instance is fully drivable and observable over HTTP**, which is how the whole of Stage 1
+was verified from SSH with nobody holding a controller:
+
+- `GET /api/v1/screen/still` — PNG of the emulated screen, works headless
+- `-dofile x.lua` + `GET /api/v1/lua/<name>` — calls `PCSX.WebServer.Handlers.<name>`
+- `PCSX.SIO0.slots[1].pads[1].setOverride(bit)` — forces a button with no pad and no GLFW. **Dot, not
+  colon**: the binding takes the button as its first argument.
+
+### Traps found this session — all three look like "the app is broken"
+
+1. **`virtual-pads.py` must be stopped in Game Mode.** It is a Desktop Mode workaround. Its uinput
+   pads occupy the low gamepad indices, so `PAD_ID=0` binds to a pad nobody is holding and the Deck's
+   own controls appear dead. Stopping `ps1-pads` fixes it **live** — the emulator rescans on joystick
+   hotplug. The unit is now disabled and the launcher stops it anyway. `PAD_ID` indexes
+   *gamepad-capable devices*, not `/dev/input/js*`; the launcher logs the mapping.
+2. **Windowless is not silent.** instB has no window but its SPU still opens an audio device, so the
+   host hears both sides. The launcher sets `SPU.Mute` on instB. Stage 2 turns that mute into a tap.
+3. **Steam's `steamwebhelper` owns `127.0.0.1:8080`**, and the emulator's web server fails to bind
+   *silently* — a collision looks like a clean launch with a dead control surface. Control ports are
+   6680/6681 and the launcher pings both after startup.
+
+Also: the PC, Deck 1 and the shared AppImage were each carrying a **different** emulator build.
+`install.sh` now md5-verifies the binary on arrival; all sides are on `f5d3e902a8a709e7c12d1904e49786c1`.
+
+### Next
+
+Stage 2 — bespoke streaming: instB's video and audio to the joiner, controller input back. Input is
+now a hard requirement rather than an option, because a headless instB has no GLFW at all. Pad
+overrides are the mechanism; HTTP is the prototype, not the transport.
+
+---
+
 ## 🎉 THE GOAL IS MET — twice over, and it is portable
 
 Two working configurations, both verified in live gameplay on 2026-07-25:
