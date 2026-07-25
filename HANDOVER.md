@@ -129,6 +129,13 @@ back. Input is a hard requirement rather than an option, because a headless inst
 all. Pad overrides are the mechanism and `takeScreenShot()` is the frame source; HTTP is the
 prototype, not the transport.
 
+**Start with the frame/audio export patch, not the UI** (agreed session 9). Stage 2 needs a joiner,
+but a second Steam shortcut reading an address from a conf file is enough of one — the Host/Join
+screen and LAN discovery are Stage 3. Encode latency, audio sync and CPU headroom are the risks, all
+of them measurable without a front end, and any of them can force a redesign. The one call that
+cannot be deferred is what identifies a host, because the wire format inherits it. See the ordering
+in `docs/DESIGN-unified-app.md`.
+
 One thing worth revisiting: the Game Mode shortcut was claimed by overwriting `ps1-link.sh` (the old
 target is kept beside it as `ps1-link-netpeer.sh`). The cleaner route is `steamos-add-to-steam`,
 documented in the session-5 gotchas below — it registers a shortcut from *within* Game Mode.

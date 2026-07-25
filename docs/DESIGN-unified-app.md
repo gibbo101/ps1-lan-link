@@ -164,10 +164,34 @@ with software x264 encoding for one stream, load ~3.9 of 8 threads — encouragi
 Input is no longer optional here: a headless instB has no GLFW, so the joiner's pad has to be
 injected. Pad overrides are the mechanism; the HTTP route is the prototype, not the transport.
 
+**Stage 2 needs the role split, not the Host/Join screen** (agreed with the tester, session 9). Something
+has to run on the joining Deck, but that can be a second Steam shortcut reading a `join.conf` with
+the host's address, the way `link.conf` already works. Every risk above is a measurement, and none of
+them needs a UI — building the front end first would mean building it against a transport that may
+not survive its own frame budget.
+
+Order:
+
+1. **Frame and audio export from instB** — the emulator patch. `takeScreenShot()` is the proven hook
+   but PNG-per-frame over HTTP is far too slow to be the transport.
+2. **The crudest possible joiner** — a fullscreen window on the second Deck that decodes and sends
+   pad input back through the override path. Config'd address, no discovery.
+3. **Measure** — end-to-end latency, and whether both emulators still hold 60 fps with an encoder
+   running alongside them.
+
+The one thing that cannot be deferred, because the protocol bakes it in, is **what identifies a
+host**. An address in a conf file now makes the later swap to broadcast discovery small; an
+assumption about pairing or addressing in the wire format does not come out again.
+
+The stream endpoint is also the first listener in this project that has to accept a connection from
+the LAN. It carries frames, audio and pad input only — it must not become a second route to the
+emulator's Lua and memory APIs, which is what `patches/loopback-bind-session9.patch` just shut.
+
 ### Stage 3 — the product
 
 Host/Join screens, LAN discovery, game picker over the RetroDeck library (with `.cue` generation and
-`.ecm` handling), remembered settings, clean errors.
+`.ecm` handling), remembered settings, clean errors. This is where the two shortcuts and the conf
+files from stage 2 collapse into one app.
 
 ## What carries over from session 7
 
