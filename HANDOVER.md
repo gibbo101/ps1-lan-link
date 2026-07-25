@@ -185,8 +185,8 @@ carries only video, audio and input. Measured wifi path Deck 2 → Deck 1: **0% 
 | Piece | State |
 |---|---|
 | Sunshine 2026.516 | flatpak `dev.lizardbyte.app.Sunshine`, run as user unit `ps1-sunshine` |
-| Moonlight 6.1.0 | flatpak on **both** Decks; Game Mode shortcut registered on Deck 2 (`second Steam account` account) |
-| Web UI creds | `deck` / `REDACTED` (local service; change at will) |
+| Moonlight 6.1.0 | flatpak on **both** Decks; Game Mode shortcut registered on Deck 2 (second Steam account) |
+| Web UI creds | set at first run; not recorded here — reset with the `/api/password` call below |
 | Config | `~/.var/app/dev.lizardbyte.app.Sunshine/config/sunshine/sunshine.conf` |
 
 **Four things had to be right, each of which cost real time:**
@@ -424,8 +424,9 @@ extracted tree (md5 `5d496f64…` on both; the AppImage's original is kept as
 Decks before trusting any comparative measurement.** Rebuild the AppImage if you want this to stop
 being a hazard.
 
-Game Mode shortcut on Deck 2 is registered under the **`second Steam account`** account (userdata `<userdata-id>`) —
-that is the account logged into Game Mode there, so it is the only one that can see it.
+Game Mode shortcut on Deck 2 is registered under the **second Steam account** (its own `userdata`
+directory) — that is the account logged into Game Mode there, so it is the only one that can see it.
+Find it with `ls ~/.steam/steam/userdata/`.
 `ps1-lan-link.desktop` is now in `deploy/deck/` (it was missing, which is why Deck 2 had no shortcut).
 
 Roles: **Deck 2 = server (10.0.0.2), Deck 1 = client (10.0.0.1 → 10.0.0.2)**.

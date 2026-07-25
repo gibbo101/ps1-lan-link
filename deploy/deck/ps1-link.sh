@@ -17,8 +17,9 @@ BIOS="$DIR/bios/scph7001.bin"
 CUE="$DIR/roms/retaliation-allies.cue"
 
 # Role/peer live in link.conf so the Game Mode shortcut never changes when the peer does.
+# These are only the fallbacks for a missing link.conf; set the real peer there.
 ROLE=client
-HOST=<peer>
+HOST=127.0.0.1
 PORT=6699
 [ -f "$CONF" ] && source "$CONF"
 
