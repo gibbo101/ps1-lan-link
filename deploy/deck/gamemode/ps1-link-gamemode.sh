@@ -24,10 +24,20 @@ BIOS="$DIR/bios/scph7001.bin"
 ROMS="$DIR/roms"
 LIB="${LIB:-$HOME/retrodeck/roms/psx}"
 
-PORT=6699           # SIO1 link, loopback only
-# Kept next to the link port and away from the 8080/8081 range: Steam's own steamwebhelper listens
-# on 8080, and the emulator's web server fails to bind silently, so a collision looks like a working
-# launch with a dead control surface.
+# SIO1 link. Only loopback is ever *used* — the client dials 127.0.0.1 — but the emulator's
+# listener hardcodes 0.0.0.0 (upstream `UvFifoListener::start`), and it re-points the link at any
+# later connection, so a peer on the LAN can displace instB mid-match. Confining this needs an
+# upstream bind-address setting; until then it is exposure we carry knowingly.
+PORT=6699
+# Control surface. Kept next to the link port and away from 8080/8081: Steam's own steamwebhelper
+# listens on 8080, and the emulator's web server fails to bind silently, so a collision looks like a
+# working launch with a dead control surface.
+#
+# SECURITY: this API is unauthenticated and also binds 0.0.0.0. Anyone who can reach the Deck can
+# read the screen, drive both pads, dump emulated RAM, and — via /api/v1/screen/save?filepath= —
+# overwrite any file this user can write. Requests are plain GETs with no CSRF token, so a web page
+# the Deck opens can fire them too. Only run this on a network you trust until the bind address is
+# patched to 127.0.0.1; CTL=0 disables it, at the cost of the start-together behaviour below.
 WEB_A=6680          # instA  control/verification surface
 WEB_B=6681          # instB  control/verification surface — the only way to drive a headless pad
 
@@ -36,12 +46,16 @@ exec > >(tee "$LOG") 2>&1
 echo "[gm] === launch $(date '+%F %T') ==="
 
 GAME="${1:-}"
+# gamemode.conf sets CTL, so a value passed in the environment has to be remembered across the
+# source or it is silently overwritten — which would hand the no-control-surface relaunch below the
+# same CTL=1 it was trying to escape, and loop forever.
+CTL_ENV="${CTL:-}"
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && source "$CONF"
 GAME="${1:-${GAME:-}}"
 PAD_ID="${PAD_ID:-0}"
 FULLSCREEN="${FULLSCREEN:-1}"
-CTL="${CTL:-1}"          # set 0 to leave the HTTP control surface off
+CTL="${CTL_ENV:-${CTL:-1}}"   # set 0 to leave the HTTP control surface off
 
 die() { echo "[gm] ERROR: $*"; exit 1; }
 [ -x "$BIN" ] || die "emulator missing: $BIN"

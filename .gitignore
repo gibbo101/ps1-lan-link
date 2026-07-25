@@ -1,5 +1,9 @@
+# Anchored to the repo root on purpose: an unanchored `pcsx-redux/` also matched
+# deploy/deck/home/.config/pcsx-redux/, which silently kept the launcher's config template out of
+# the repo and left a fresh clone unable to generate per-instance configs at all.
+
 # Disc images, BIOS and extracted executables — copyrighted and multi-GB.
-work/
+/work/
 
 # BIOS and discs are never redistributable, wherever they happen to land. Matching by extension as
 # well as by directory means a stray image cannot be swept in by `git add -A`.
@@ -14,9 +18,9 @@ roms/
 *.AppImage
 
 # Upstream clone with its own history, plus build output. Our changes live in patches/.
-pcsx-redux/
+/pcsx-redux/
 
-venv/
+/venv/
 __pycache__/
 *.pyc
 
