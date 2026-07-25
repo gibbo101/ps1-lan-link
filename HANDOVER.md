@@ -118,7 +118,9 @@ was two builds behind (`5d496f64…`, session 6) and had the same exposure, and 
 is kept as `ps1-link-netpeer.sh`. Launched from Deck 1's Game Mode library: link sockets 2, all three
 listeners on `127.0.0.1`, both instances at 100.0% / 60 fps, both pads visible to Steam Input, and
 **The tester played a linked match — "running fine", with the familiar menu slowdown and full-speed
-gameplay.** The menu dip is session 6's idle-poll cost, not this patch.
+gameplay.** The menu dip is session 6's idle-poll cost, not this patch. Screens in
+`docs/session9-evidence/`, including both sides at match options with identical settings and only
+the host offered the start.
 
 ### Next
 
