@@ -68,11 +68,43 @@ was verified from SSH with nobody holding a controller:
 Also: the PC, Deck 1 and the shared AppImage were each carrying a **different** emulator build.
 `install.sh` now md5-verifies the binary on arrival; all sides are on `f5d3e902a8a709e7c12d1904e49786c1`.
 
+### Where the code lives now
+
+**`github.com/gibbo101/ps1-lan-link`, private.** Public later, once we are satisfied — see the
+security debts below, which are the gate. History was rewritten on 2026-07-25 to remove a password,
+a family member's Steam account name and userdata id, and a tailnet address; every commit hash
+predating that differs from anything quoted in older notes.
+
+The repo is registered in `~/.claude/dev_journey.md` (tracker `none`, base `main`, PR flow `none`),
+so `/status` and `/dev-code-review` work here. `/dev-code-review` only has branch-only mode, and
+that mode diffs against `origin/main` — now that a remote exists it works normally.
+
+### Security debts — the gate on going public
+
+Both are upstream binds we cannot configure, and both are documented in the launcher itself:
+
+1. **The control API (6680/6681) is unauthenticated and binds `0.0.0.0`.** Anyone who can reach the
+   Deck can read the screen, drive both pads, dump emulated RAM, and overwrite **any file this user
+   can write** via `/api/v1/screen/save?filepath=`. Plain GETs with no CSRF token, so a web page the
+   Deck opens can fire them too. `CTL=0` disables it, at the cost of the start-together behaviour.
+2. **The SIO1 listener (6699) also binds `0.0.0.0`**, and re-points the link at *any* later
+   connection — a host on the LAN can displace instB mid-match. Only the client side is confined to
+   loopback.
+
 ### Next
 
-Stage 2 — bespoke streaming: instB's video and audio to the joiner, controller input back. Input is
-now a hard requirement rather than an option, because a headless instB has no GLFW at all. Pad
-overrides are the mechanism; HTTP is the prototype, not the transport.
+**Do the bind-address patch first.** Stage 2 requires patching the emulator anyway, and everything
+the launcher needs is local, so binding both listeners to `127.0.0.1` costs one patch and clears
+both debts. Remote access for development becomes an SSH tunnel.
+
+Then Stage 2 proper — bespoke streaming: instB's video and audio to the joiner, controller input
+back. Input is a hard requirement rather than an option, because a headless instB has no GLFW at
+all. Pad overrides are the mechanism and `takeScreenShot()` is the frame source; HTTP is the
+prototype, not the transport.
+
+One thing worth revisiting: the Game Mode shortcut was claimed by overwriting `ps1-link.sh` (the old
+target is kept beside it as `ps1-link-netpeer.sh`). The cleaner route is `steamos-add-to-steam`,
+documented in the session-5 gotchas below — it registers a shortcut from *within* Game Mode.
 
 ---
 
