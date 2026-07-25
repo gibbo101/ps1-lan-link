@@ -174,6 +174,15 @@ Order:
 
 1. **Frame and audio export from instB** — the emulator patch. `takeScreenShot()` is the proven hook
    but PNG-per-frame over HTTP is far too slow to be the transport.
+   **Done, session 10** (`patches/media-export-session10.patch`): 60.1 fps and 44.1 kHz out of a
+   headless instance with the emulator still at 100.1%, costing 11–38 µs per frame on the emulation
+   thread. Two decisions came out of it that the rest of stage 2 inherits:
+   - **The export is a local unix socket, not a network listener.** The encoder and the LAN
+     transport are a separate process, so the emulator never accepts a connection from the LAN and
+     the "must not become a second route to Lua and memory" constraint below is satisfied
+     structurally rather than by discipline.
+   - **Raw video is ~86–113 Mbit/s**, so an encoder is required, not optional. It was left out of
+     the emulator deliberately, so its cost is measured separately rather than baked in.
 2. **The crudest possible joiner** — a fullscreen window on the second Deck that decodes and sends
    pad input back through the override path. Config'd address, no discovery.
 3. **Measure** — end-to-end latency, and whether both emulators still hold 60 fps with an encoder

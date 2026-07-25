@@ -10,6 +10,84 @@ menu slowness, and the loopback story (session 4) for *how the link works*.
 
 ---
 
+## 📺 Session 10 — instB's frames and audio come out; stage 2 step 1 is done
+
+`patches/media-export-session10.patch`. A headless instance now publishes every displayed frame and
+the mixed audio it would have played, and both were verified arriving from a real Retaliation boot.
+**Not yet deployed to the Decks**, and there is no joiner yet — that is step 2.
+
+**The emulator does not listen on the LAN, and should not start.** It publishes to a **unix domain
+socket**; the encoder and whatever goes on the wire belong to a separate process. `DESIGN-unified-app.md`
+warns that the stream endpoint "must not become a second route to the emulator's Lua and memory
+APIs" — keeping the LAN listener out of the emulator process entirely is the strongest form of that,
+and it keeps ffmpeg/x264 out of the pcsx-redux build. Preserve this when building the joiner.
+
+| Piece | Where |
+|---|---|
+| `src/support/mediastream.{h,cc}` | exporter thread, socket, bounded queues, wire format, `STREAM` line |
+| `src/core/psxemulator.cc` | `vsync()` → `exportFrame()`, after `vblank()` so the frame is complete |
+| `src/spu/miniaudio.cc` | taps the mixed int16 **before** the mute zeroing |
+| `src/main/main.cc` | `-stream` / `-stream-socket <path>` / `PCSX_STREAM_SOCKET`; `-no-stream` wins |
+| `tools/stream-probe.py` | the consumer: parses the stream, writes PNGs and a wav, reports rates |
+
+**Measured on the PC, one headless instance booting Retaliation** (`-no-ui -run -stream`):
+
+| | |
+|---|---|
+| Emulation while streaming | **100.14–100.41% / 60.1 fps**, unchanged from solo |
+| Frames delivered | **601 in 10.0 s = 60.1 fps**, `dropped=0`, backlog empty |
+| Frame gap | median 16.4 ms, p99 21.2, max 21.3 |
+| Audio | **44100 Hz, 44 104 frames/s** — exactly real time, `dropped=0` |
+| Cost on the emulation thread | `pushMaxUs=11–38 µs` against a 16 600 µs frame budget |
+
+Both pixel formats were confirmed **visually**, not just by byte count: the 24bpp FMV and the 16bpp
+title screen at 512x240 with correct colours (a red/blue swap in the BGR555 unpack would show here).
+
+**The number that decides step 2: raw video is 10.8–14.1 MiB/s, about 86–113 Mbit/s.** That is fine
+over a unix socket and **too much for the Deck's wifi**, so an encoder is required rather than
+optional. Encoding was deliberately left out of the emulator so its cost is measured separately
+instead of baked in.
+
+**Producers never block.** Video (emulation thread) and audio (device thread) hand to bounded queues
+that drop and count; all I/O is on the exporter thread, which holds no lock while writing. Given
+that every previous failure in this project was a stall propagating into the link, the export must
+not be able to add one. Drop counters are cumulative and uncapped, so a silently degrading stream
+cannot look like a healthy one.
+
+### Traps found this session
+
+1. **`-j$(nproc)` OOM-killed the whole desktop, twice.** Several translation units need ~2.2 GB in
+   `cc1plus`; 20 of them exhaust 31 GB, the kernel starts killing the session, and the machine locks
+   up hard enough to need a power cycle. **`make -j4` in this file is a memory limit, not a
+   preference.** Build with `-j4` and `--memory=12g --cpus=4` on `docker run` so an overrun kills the
+   compiler and not the user's session. Diagnose a suspected lockup with
+   `journalctl -b -1 --no-pager | grep "invoked oom-killer"`.
+2. **A unix socket path is capped at 108 bytes** (`sun_path`), which is shorter than a lot of temp
+   directories. The failure is reported rather than silent — unlike the web server's bind — but put
+   the socket in `$XDG_RUNTIME_DIR` (`/run/user/1000`), which is where the default lands anyway.
+3. **Muting instB does not mute the stream, by construction.** The tap runs before the mute zeroing,
+   verified with `SPU.Mute = true`: local device silent, stream still carrying audible samples.
+
+### Wire format (little-endian; a consumer implementation is `tools/stream-probe.py`)
+
+24-byte `Hello` on connect — magic `P1LS`, version, header size, audio rate, channels, max video
+dimensions. Then 24-byte packets: magic `P1PK`, type (1 video / 2 audio), format (video: 0 BGR555,
+1 RGB888; audio: 0 s16 interleaved), width (audio: channels), height (audio: frame count), aux
+(audio: sample rate), payload length, and a monotonic microsecond timestamp taken when the producer
+handed the data over. One consumer at a time; a slow one gets frames dropped, not the emulator
+stalled.
+
+### Next — step 2, the crudest possible joiner
+
+A fullscreen window on the second Deck that decodes this stream and sends pad input back. Input
+still goes through the pad-override path; the open question is whether it rides this same socket
+(low latency, no HTTP) or the existing loopback HTTP control surface (already proven). Then step 3:
+measure end-to-end latency and whether both emulators still hold 60 fps with an encoder alongside
+them. **What identifies a host is still the one call that cannot be deferred** — an address in a
+conf file now, per the design.
+
+---
+
 ## 🔒 Session 9 — every listener binds loopback
 
 `patches/loopback-bind-session9.patch`. The web server, the SIO1 listener and the GDB server all
