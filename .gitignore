@@ -1,0 +1,13 @@
+# Disc images, BIOS and extracted executables — copyrighted and multi-GB.
+work/
+
+# Upstream clone with its own history, plus build output. Our changes live in patches/.
+pcsx-redux/
+
+venv/
+__pycache__/
+*.pyc
+
+# Raw emulator logs run to tens of MB. The SPEED extracts in docs/session7-evidence are the evidence.
+docs/session7-evidence/*-run.log
+*.stale

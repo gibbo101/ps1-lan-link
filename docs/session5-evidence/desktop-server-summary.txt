@@ -1,0 +1,89 @@
+### desktop-server.log summary (full log was 223406 lines, trimmed)
+LINK TUNING: SIO1-DIAG t=  1923.118 LINK TUNING stallUs=15000 pollCycles=8000
+game wrote DATA total: 394
+RXMSG total:           35342
+LOG CAP REACHED lines: 0
+
+=== first 40 lines ===
+Loading memory card ~/Documents/development/ps1-lan-link/work/instances/instA/.config/pcsx-redux/memcard1.mcd
+Loading memory card ~/Documents/development/ps1-lan-link/work/instances/instA/.config/pcsx-redux/memcard2.mcd
+Warning: OpenGL error reporting disabled. See About dialog for more information.
+Loaded CD Image: ~/Documents/development/ps1-lan-link/work/roms/retaliation-allies.cue[+cue].
+Track 01 (DATA) - Start 00:02:00, Length 58:38:30
+CD-ROM Label: 
+CD-ROM ID: SLUS00665
+CD-ROM EXE Name: SLUS_006.65;1
+PCSX-Redux booting
+Copyright (C) 2019-2025 PCSX-Redux authors
+CPU type: Dynarec (x86-64)
+Loaded BIOS: ~/Documents/development/ps1-lan-link/work/bios/scph7001.bin
+Known BIOS detected: SCPH-7001 (US) (502224b6)
+BIOS Trace1: 0x0f
+BIOS Trace1: 0x0e
+BIOS Trace1: 0x01
+BIOS Trace1: 0x02
+BIOS Trace1: 0x03
+BIOS Trace1: 0x04
+BIOS Trace1: 0x01
+BIOS Trace1: 0x03
+BIOS Trace1: 0x04
+BIOS Trace1: 0x05
+BIOS Trace1: 0x06
+BIOS Trace1: 0x02
+BIOS Trace1: 0x05
+
+PS-X Realtime Kernel Ver.2.5
+Copyright 1993,1994 (C) Sony Computer Entertainment Inc. 
+BIOS Trace1: 0x06
+KERNEL SETUP!
+
+Configuration : EvCB	0x10		TCB	0x04
+BIOS Trace1: 0x07
+System ROM Version 4.1 12/16/97 A
+Copyright 1993-1997 (C) Sony Computer Entertainment Inc.
+ResetCallback: _96_remove ..
+Got an unknown GPU data word: 0008a16c (cmdType: 0, command: 0)
+BIOS Trace1: 0x00
+BIOS Trace1: 0x01
+
+=== last 40 lines ===
+SIO1-DIAG t=154087.649 cyc=4059726618 TXFC dxr=0 xts=1 ctrl=0025 initial=0
+SIO1-DIAG t=154087.650 cyc=4059726618 TXMSG #9668 size=4 bytes=12 02 10
+SIO1-DIAG t=154087.652 cyc=4059726641 LINKSTATE WR[act=00000000 buf=801b530a cnt=00000000 latch=00000080] RD[act=00000000 buf=801b5310 cnt=00000002] block=1 cfg=0005 DSR=0 DTR=0 stat=0105 ctrl=0025 fifo=0
+SIO1-DIAG t=154087.654 cyc=4059726641 game read STAT=0105 ctrl=0025 [DSR=0 CTS=1 RXRDY=0] pc=80153c88 (prev value held for 1 reads) totalReads=694763
+SIO1-DIAG t=154717.759 cyc=4059816900 STAT poll sample pc=80153ce4 stat=0105 reads=696320
+SIO1-DIAG t=156383.033 cyc=4060054468 STAT poll sample pc=80153ce4 stat=0105 reads=700416
+SIO1-DIAG t=158094.862 cyc=4060334331 STAT poll sample pc=80153ce4 stat=0105 reads=704512
+SIO1-DIAG t=159760.167 cyc=4060571899 STAT poll sample pc=80153ce4 stat=0105 reads=708608
+SIO1-DIAG t=161473.383 cyc=4060842254 STAT poll sample pc=80153ce4 stat=0105 reads=712704
+SIO1-DIAG t=163138.691 cyc=4061079822 STAT poll sample pc=80153ce4 stat=0105 reads=716800
+SIO1-DIAG t=164788.993 cyc=4061317390 STAT poll sample pc=80153ce4 stat=0105 reads=720896
+SIO1-DIAG t=166500.941 cyc=4061587747 STAT poll sample pc=80153ce4 stat=0105 reads=724992
+SIO1-DIAG t=168166.237 cyc=4061825315 STAT poll sample pc=80153ce4 stat=0105 reads=729088
+SIO1-DIAG t=169878.461 cyc=4062095670 STAT poll sample pc=80153ce4 stat=0105 reads=733184
+SIO1-DIAG t=171543.757 cyc=4062333238 STAT poll sample pc=80153ce4 stat=0105 reads=737280
+SIO1-DIAG t=173255.469 cyc=4062603595 STAT poll sample pc=80153ce4 stat=0105 reads=741376
+SIO1-DIAG t=174905.753 cyc=4062841163 STAT poll sample pc=80153ce4 stat=0105 reads=745472
+SIO1-DIAG t=176617.238 cyc=4063111518 STAT poll sample pc=80153ce4 stat=0105 reads=749568
+SIO1-DIAG t=178282.526 cyc=4063349086 STAT poll sample pc=80153ce4 stat=0105 reads=753664
+SIO1-DIAG t=179947.852 cyc=4063586654 STAT poll sample pc=80153ce4 stat=0105 reads=757760
+SIO1-DIAG t=181660.687 cyc=4063857011 STAT poll sample pc=80153ce4 stat=0105 reads=761856
+SIO1-DIAG t=183310.989 cyc=4064094579 STAT poll sample pc=80153ce4 stat=0105 reads=765952
+SIO1-DIAG t=185024.111 cyc=4064364934 STAT poll sample pc=80153ce4 stat=0105 reads=770048
+SIO1-DIAG t=186689.408 cyc=4064602502 STAT poll sample pc=80153ce4 stat=0105 reads=774144
+SIO1-DIAG t=188401.115 cyc=4064872859 STAT poll sample pc=80153ce4 stat=0105 reads=778240
+SIO1-DIAG t=190066.411 cyc=4065110427 STAT poll sample pc=80153ce4 stat=0105 reads=782336
+SIO1-DIAG t=191778.030 cyc=4065380782 STAT poll sample pc=80153ce4 stat=0105 reads=786432
+SIO1-DIAG t=193428.323 cyc=4065618350 STAT poll sample pc=80153ce4 stat=0105 reads=790528
+SIO1-DIAG t=195093.599 cyc=4065855918 STAT poll sample pc=80153ce4 stat=0105 reads=794624
+SIO1-DIAG t=196805.139 cyc=4066126275 STAT poll sample pc=80153ce4 stat=0105 reads=798720
+SIO1-DIAG t=198470.426 cyc=4066363843 STAT poll sample pc=80153ce4 stat=0105 reads=802816
+SIO1-DIAG t=200181.927 cyc=4066634208 STAT poll sample pc=80153ce4 stat=0105 reads=806912
+SIO1-DIAG t=201847.216 cyc=4066871776 STAT poll sample pc=80153ce4 stat=0105 reads=811008
+SIO1-DIAG t=203558.838 cyc=4067142131 STAT poll sample pc=80153ce4 stat=0105 reads=815104
+SIO1-DIAG t=205209.125 cyc=4067379699 STAT poll sample pc=80153ce4 stat=0105 reads=819200
+SIO1-DIAG t=206920.724 cyc=4067650052 STAT poll sample pc=80153ce4 stat=0105 reads=823296
+SIO1-DIAG t=208586.042 cyc=4067887620 STAT poll sample pc=80153ce4 stat=0105 reads=827392
+SIO1-DIAG t=210251.338 cyc=4068125188 STAT poll sample pc=80153ce4 stat=0105 reads=831488
+SIO1-DIAG t=211963.016 cyc=4068395543 STAT poll sample pc=80153ce4 stat=0105 reads=835584
+SIO1-DIAG t=213613.309 cyc=4068633111 STAT poll sample pc=80153ce4 stat=0105 reads=839680

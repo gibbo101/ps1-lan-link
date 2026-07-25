@@ -1,0 +1,644 @@
+diff --git a/src/core/sio1.cc b/src/core/sio1.cc
+index 509ab396..2e1866a8 100644
+--- a/src/core/sio1.cc
++++ b/src/core/sio1.cc
+@@ -19,6 +19,173 @@
+ 
+ #include "core/sio1.h"
+ 
++#include <uv.h>
++
++#include <cstring>
++
++#include "core/system.h"
++
++namespace {
++
++// Milliseconds since the first diagnostic call, for merging the two instances' logs
++// into one timeline. Cycle counts order events within an instance; wall clock across them.
++double diagMs() {
++    static const auto start = std::chrono::steady_clock::now();
++    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++}
++
++// Volume ceiling for per-event logs, high enough that the handshake (order 100 events)
++// is never truncated.
++constexpr unsigned kDiagCap = 50000;
++
++}  // namespace
++
++uint64_t PCSX::SIO1::diagCycle() { return g_emulator->m_cpu->m_regs.cycle; }
++
++// Returns whether this event should be logged, announcing the cutoff exactly once so that
++// a missing log line can always be distinguished from an event that did not happen.
++bool PCSX::SIO1::diagBudget(unsigned &counter, const char *what) {
++    if (++counter < kDiagCap) return true;
++    if (counter == kDiagCap) {
++        g_system->printf("SIO1-DIAG t=%10.3f LOG CAP REACHED for %s after %u events; further ones NOT logged\n",
++                         diagMs(), what, kDiagCap);
++    }
++    return false;
++}
++
++// The link socket lives on the main loop, which the UI pumps once per rendered frame. A protocol
++// that acknowledges every block then pays a frame period per acknowledgement, which dominates
++// everything else. Servicing the loop here, on each hsync, carries a message in about a scanline.
++//
++// While the program is spinning on SIO_STAT waiting for the far end, also spend a bounded slice of
++// *wall* time waiting for the peer instead of letting emulated time run on. On real hardware a
++// block acknowledgement costs a byte time; across two processes it costs a host round trip, and if
++// emulated time advances meanwhile the program sees a delay far longer than its driver tolerates.
++// Stalling here keeps the two clocks aligned; the bound means a peer that never answers only ever
++// costs this much per scanline.
++void PCSX::SIO1::pumpTransport() {
++    uv_run(g_system->getLoop(), UV_RUN_NOWAIT);
++    if (!m_fifo || m_fifo->size() != 0) return;
++    // Only when the program is actively polling the port, i.e. blocked on the link.
++    if (diagCycle() - m_lastStatReadCycle > kPollingWindowCycles) return;
++    auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(kLinkStallUs);
++    while (m_fifo->size() == 0 && std::chrono::steady_clock::now() < deadline) {
++        uv_run(g_system->getLoop(), UV_RUN_NOWAIT);
++    }
++}
++
++void PCSX::SIO1::setDsr(bool value) {
++    bool was = !!(m_regs.status & SR_DSR);
++    if (value) {
++        m_regs.status |= SR_DSR;
++    } else {
++        m_regs.status &= ~SR_DSR;
++    }
++    if (was == value) return;
++    m_lineChangedThisDrain = true;
++    if (value) {
++        m_dsrRiseCycle = diagCycle();
++        m_dsrRiseStatReads = m_statReadsWithDsr;
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu DSR 0->1\n", diagMs(), (unsigned long long)diagCycle());
++    } else {
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu DSR 1->0 held=%llu cyc, game STAT reads while high=%u\n",
++                         diagMs(), (unsigned long long)diagCycle(),
++                         (unsigned long long)(diagCycle() - m_dsrRiseCycle), m_statReadsWithDsr - m_dsrRiseStatReads);
++    }
++}
++
++void PCSX::SIO1::setCts(bool value) {
++    bool was = !!(m_regs.status & SR_CTS);
++    if (value) {
++        m_regs.status |= SR_CTS;
++    } else {
++        m_regs.status &= ~SR_CTS;
++    }
++    flushTxHold();
++    if (was == value) return;
++    m_lineChangedThisDrain = true;
++    if (value) {
++        m_ctsRiseCycle = diagCycle();
++        m_ctsRiseStatReads = m_statReadsWithCts;
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu CTS 0->1\n", diagMs(), (unsigned long long)diagCycle());
++    } else {
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu CTS 1->0 held=%llu cyc, game STAT reads while high=%u\n",
++                         diagMs(), (unsigned long long)diagCycle(),
++                         (unsigned long long)(diagCycle() - m_ctsRiseCycle), m_statReadsWithCts - m_ctsRiseStatReads);
++    }
++}
++
++// Retaliation's link driver keeps the DSR level it last acted on at 0x801F85E8 and advances
++// only when the live DSR differs from it. Reading emulated RAM directly (rather than inferring
++// from the program counter, which the dynarec reports per-block) shows exactly which level each
++// side latched and when, against the DSR it was actually seeing.
++void PCSX::SIO1::watchLinkBaseline() {
++    uint8_t *wram = g_emulator->m_mem->m_wram;
++    if (!wram) return;
++    uint32_t w[4], r[4];
++    memcpy(w, wram + (kLinkStateAddr & 0x1fffff), sizeof(w));
++    memcpy(r, wram + (kReadStateAddr & 0x1fffff), sizeof(r));
++    bool dsr = m_regs.status & SR_DSR;
++    bool wChanged = memcmp(w, m_lastLinkState, sizeof(w)) != 0;
++    bool rChanged = memcmp(r, m_lastReadState, sizeof(r)) != 0;
++    if (!wChanged && !rChanged && dsr == m_lastLinkBaselineDsr) return;
++
++    // The block size gates every handshake: the writer waits for a DSR edge after this many
++    // bytes, and the reader toggles DTR after the same count.
++    uint16_t cfg = 0;
++    memcpy(&cfg, wram + (kLinkConfigAddr & 0x1fffff), sizeof(cfg));
++    uint32_t idx = (cfg & 0x300) >> 7;
++    int16_t block = 0;
++    memcpy(&block, wram + ((0x801ace30 + idx) & 0x1fffff), sizeof(block));
++
++    g_system->printf(
++        "SIO1-DIAG t=%10.3f cyc=%llu LINKSTATE WR[act=%08x buf=%08x cnt=%08x latch=%08x] "
++        "RD[act=%08x buf=%08x cnt=%08x] block=%d cfg=%04x DSR=%d DTR=%d stat=%04x ctrl=%04x fifo=%zu\n",
++        diagMs(), (unsigned long long)diagCycle(), w[0], w[1], w[2], w[3], r[0], r[1], r[2], block, cfg, dsr,
++        !!(m_regs.control & CR_DTR), m_regs.status, m_regs.control, m_sio1fifo ? m_sio1fifo->size() : 0);
++    memcpy(m_lastLinkState, w, sizeof(w));
++    memcpy(m_lastReadState, r, sizeof(r));
++    m_lastLinkBaselineDsr = dsr;
++}
++
++// A drain that consumes several messages in one poll applies all their line transitions
++// between two emulated instructions, so the game cannot observe any but the last.
++void PCSX::SIO1::logDrain() {
++    g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu DRAIN %u messages in one poll\n", diagMs(),
++                     (unsigned long long)diagCycle(), m_msgsThisDrain);
++}
++
++// Status polling is the game's only view of DSR/CTS, so every read is counted, but only
++// changes in the observed value are printed.
++void PCSX::SIO1::logStatRead() {
++    watchLinkBaseline();
++    m_lastStatReadCycle = diagCycle();
++    m_statReads++;
++    if (m_regs.status & SR_DSR) m_statReadsWithDsr++;
++    if (m_regs.status & SR_CTS) m_statReadsWithCts++;
++
++    // Where the polling loop lives. Sampled, because this is a high-volume success event and the
++    // loop repeats from the same address; the change-triggered line below is the uncapped record.
++    if ((m_statReads & 0xfff) == 0) {
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu STAT poll sample pc=%08x stat=%04x reads=%u\n", diagMs(),
++                         (unsigned long long)diagCycle(), g_emulator->m_cpu->m_regs.pc, m_regs.status, m_statReads);
++    }
++
++    if (m_regs.status == m_lastLoggedStat && m_regs.control == m_lastLoggedStatCtrl) {
++        m_statRepeats++;
++        return;
++    }
++    g_system->printf(
++        "SIO1-DIAG t=%10.3f cyc=%llu game read STAT=%04x ctrl=%04x [DSR=%d CTS=%d RXRDY=%d] pc=%08x (prev value held "
++        "for %u reads) totalReads=%u\n",
++        diagMs(), (unsigned long long)diagCycle(), m_regs.status, m_regs.control, !!(m_regs.status & SR_DSR),
++        !!(m_regs.status & SR_CTS), !!(m_regs.status & SR_RXRDY), g_emulator->m_cpu->m_regs.pc, m_statRepeats,
++        m_statReads);
++    m_lastLoggedStat = m_regs.status;
++    m_lastLoggedStatCtrl = m_regs.control;
++    m_statRepeats = 0;
++}
++
+ PCSX::SIOPayload PCSX::SIO1::makeFlowControlMessage() {
+     return SIOPayload{
+         DataTransfer{},
+@@ -37,6 +204,13 @@ PCSX::SIOPayload PCSX::SIO1::makeDataMessage(std::string &&data) {
+ 
+ void PCSX::SIO1::transmitMessage(std::string &&message) {
+     if (fifoError()) return;
++    if (diagBudget(m_nTxMsg, "TXMSG")) {
++        unsigned b0 = message.size() > 0 ? (unsigned char)message[0] : 0xffu;
++        unsigned b1 = message.size() > 1 ? (unsigned char)message[1] : 0xffu;
++        unsigned b2 = message.size() > 2 ? (unsigned char)message[2] : 0xffu;
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu TXMSG #%u size=%zu bytes=%02x %02x %02x\n", diagMs(),
++                         (unsigned long long)diagCycle(), m_nTxMsg, message.size(), b0, b1, b2);
++    }
+ 
+     m_fifo->write<uint8_t>(message.size());
+     m_fifo->write(std::move(message));
+@@ -62,10 +236,19 @@ void PCSX::SIO1::sendFlowControlMessage() {
+ 
+     pollFlowControl();
+     if (!initialMessage) {
+-        if (m_flowControl == m_prevFlowControl) return;
++        if (m_flowControl == m_prevFlowControl) {
++            g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu TXFC SUPPRESSED (unchanged) dxr=%d xts=%d ctrl=%04x\n",
++                             diagMs(), (unsigned long long)diagCycle(), m_flowControl.dxr, m_flowControl.xts,
++                             m_regs.control);
++            return;
++        }
+     }
+     m_prevFlowControl = m_flowControl;
+ 
++    g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu TXFC dxr=%d xts=%d ctrl=%04x initial=%d\n", diagMs(),
++                     (unsigned long long)diagCycle(), m_flowControl.dxr, m_flowControl.xts, m_regs.control,
++                     initialMessage);
++
+     SIOPayload payload = makeFlowControlMessage();
+     std::string message = encodeMessage(payload);
+     transmitMessage(std::move(message));
+@@ -79,6 +262,14 @@ void PCSX::SIO1::sendFlowControlMessage() {
+ void PCSX::SIO1::decodeMessage() {
+     if (fifoError()) return;
+     std::string message = m_fifo->readString(messageSize);
++    m_msgsThisDrain++;
++    if (diagBudget(m_nRxMsg, "RXMSG")) {
++        unsigned b0 = message.size() > 0 ? (unsigned char)message[0] : 0xffu;
++        unsigned b1 = message.size() > 1 ? (unsigned char)message[1] : 0xffu;
++        unsigned b2 = message.size() > 2 ? (unsigned char)message[2] : 0xffu;
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu RXMSG #%u declared=%u got=%zu bytes=%02x %02x %02x\n", diagMs(),
++                         (unsigned long long)diagCycle(), m_nRxMsg, (unsigned)messageSize, message.size(), b0, b1, b2);
++    }
+ 
+     SIOPayload payload;
+     Protobuf::InSlice inslice(reinterpret_cast<const uint8_t *>(message.data()), message.size());
+@@ -97,15 +288,35 @@ void PCSX::SIO1::decodeMessage() {
+ 
+ void PCSX::SIO1::processMessage(SIOPayload payload) {
+     if (!payload.get<DataTransferField>().get<DataTransferData>().hasData()) {
+-        setDsr(payload.get<FlowControlField>().get<FlowControlDXR>().value);
+-        setCts(payload.get<FlowControlField>().get<FlowControlXTS>().value);
++        bool dxr = payload.get<FlowControlField>().get<FlowControlDXR>().value;
++        bool xts = payload.get<FlowControlField>().get<FlowControlXTS>().value;
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu RXFC peer dxr=%d xts=%d (status was %04x, drainPos=%u)\n",
++                         diagMs(), (unsigned long long)diagCycle(), dxr, xts, m_regs.status, m_msgsThisDrain);
++        setDsr(dxr);
++        setCts(xts);
+     } else {
+         std::string &byte = payload.get<DataTransferField>().get<DataTransferData>().value;
++        unsigned value = byte.size() > 0 ? (unsigned char)byte[0] : 0xffu;
+         PCSX::Slice pushByte;
+         pushByte.acquire(std::move(byte));
+-        if (m_regs.control & CR_RTS) {
++        // Reception is enabled by RXEN. RTS is an output handshake line that games pulse; using it
++        // to gate reception discards bytes that arrive while it happens to be low.
++        if (m_regs.control & CR_RXEN) {
+             m_sio1fifo.asA<Fifo>()->pushSlice(std::move(pushByte));
++            m_rxBytesThisDrain++;
++            // Advance by exactly one baud period rather than to the current cycle, so the
++            // delivered rate stays continuous instead of resetting the clock on every byte.
++            m_lastRxDeliverCycle += m_cycleCount ? m_cycleCount : 1;
++            if (diagBudget(m_nRxAccepted, "RX accepted")) {
++                g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu RX accept #%u byte=%02x fifo=%zu ctrl=%04x\n", diagMs(),
++                                 (unsigned long long)diagCycle(), m_nRxAccepted, value, m_sio1fifo->size(),
++                                 m_regs.control);
++            }
+             receiveCallback();
++        } else {
++            static unsigned s_rxenDropCount = 0;
++            g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu RX byte DROPPED (RXEN clear) ctrl=%04x (event #%u)\n",
++                             diagMs(), (unsigned long long)diagCycle(), m_regs.control, ++s_rxenDropCount);
+         }
+     }
+ }
+@@ -122,6 +333,16 @@ void PCSX::SIO1::sio1StateMachine() {
+                     if (m_fifo->size() < messageSize) return;
+                     decodeMessage();
+                     m_decodeState = READ_SIZE;
++                    // The emulated program can only sample DSR/CTS by polling SIO_STAT between
++                    // instructions, so a handshake state that is superseded within the same drain is
++                    // never observable. Yield after each line change and resume on the next hsync,
++                    // giving every state at least one poll interval of visibility. Remaining messages
++                    // stay queued in order.
++                    if (m_lineChangedThisDrain) return;
++                    // Serial bytes arrive at the configured baud rate, roughly one per hsync at the
++                    // 115200 default. Delivering a whole queue at once overruns the program's
++                    // per-transaction read cadence and buries the receive FIFO.
++                    if (m_rxBytesThisDrain >= m_rxBytesAllowed) return;
+             }
+     }
+ }
+@@ -138,19 +359,33 @@ void PCSX::SIO1::interrupt() {
+         }
+     }
+     if (m_sio1fifo.isA<Fifo>()) {
+-        if (m_sio1fifo->size() > 8) m_sio1fifo.asA<Fifo>()->reset();
++        if (m_sio1fifo->size() > 8) {
++            static unsigned s_overflowCount = 0;
++            g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu RX FIFO OVERFLOW, discarding %zu buffered bytes (event #%u)\n",
++                             diagMs(), (unsigned long long)diagCycle(), m_sio1fifo->size(), ++s_overflowCount);
++            m_sio1fifo.asA<Fifo>()->reset();
++        }
+     }
+ }
+ 
+ uint8_t PCSX::SIO1::readData8() {
+     updateStat();
++    bool popped = false;
++    size_t before = m_sio1fifo ? m_sio1fifo->size() : 0;
+     if (m_sio1fifo && !m_sio1fifo->eof()) {
+         if (m_regs.status & SR_RXRDY) {
+             m_regs.data = m_sio1fifo->byte();
+             g_emulator->m_mem->writeHardwareRegister<0x1050, uint8_t>(m_regs.data);
++            popped = true;
+         }
+     }
+     updateStat();
++    watchLinkBaseline();
++    if (diagBudget(m_nDataReads, "DATA read")) {
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu game read DATA=%02x popped=%d fifo %zu->%zu stat=%04x\n",
++                         diagMs(), (unsigned long long)diagCycle(), (unsigned)(m_regs.data & 0xff), popped, before,
++                         m_sio1fifo ? m_sio1fifo->size() : 0, m_regs.status);
++    }
+     return m_regs.data;
+ }
+ 
+@@ -163,6 +398,11 @@ uint16_t PCSX::SIO1::readData16() {
+         }
+     }
+     updateStat();
++    if (diagBudget(m_nDataReads, "DATA read")) {
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu game read DATA16=%04x fifo=%zu stat=%04x\n", diagMs(),
++                         (unsigned long long)diagCycle(), (unsigned)(m_regs.data & 0xffff),
++                         m_sio1fifo ? m_sio1fifo->size() : 0, m_regs.status);
++    }
+     return m_regs.data;
+ }
+ 
+@@ -175,21 +415,29 @@ uint32_t PCSX::SIO1::readData32() {
+         }
+     }
+     updateStat();
++    if (diagBudget(m_nDataReads, "DATA read")) {
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu game read DATA32=%08x fifo=%zu stat=%04x\n", diagMs(),
++                         (unsigned long long)diagCycle(), m_regs.data, m_sio1fifo ? m_sio1fifo->size() : 0,
++                         m_regs.status);
++    }
+     return m_regs.data;
+ }
+ 
+ uint8_t PCSX::SIO1::readStat8() {
+     updateStat();
++    logStatRead();
+     return m_regs.status;
+ }
+ 
+ uint16_t PCSX::SIO1::readStat16() {
+     updateStat();
++    logStatRead();
+     return m_regs.status;
+ }
+ 
+ uint32_t PCSX::SIO1::readStat32() {
+     updateStat();
++    logStatRead();
+     return m_regs.status;
+ }
+ 
+@@ -243,7 +491,10 @@ void PCSX::SIO1::transmitData() {
+ }
+ 
+ bool PCSX::SIO1::isTransmitReady() {
+-    return (m_regs.control & CR_TXEN) && (m_regs.status & SR_CTS) && (m_regs.status & SR_TXRDY2);
++    // A transfer begins when the game writes TX data with TXEN set. /CTS is a flow-control input,
++    // not a condition that discards the byte: gating on it drops bytes outright whenever the peer
++    // momentarily has RTS de-asserted, which loses handshake traffic that games pulse RTS around.
++    return (m_regs.control & CR_TXEN) && (m_regs.status & SR_TXRDY2);
+ }
+ 
+ void PCSX::SIO1::updateStat() {
+@@ -265,6 +516,23 @@ void PCSX::SIO1::writeBaud16(uint16_t v) {
+ void PCSX::SIO1::writeCtrl16(uint16_t v) {
+     m_regs.control = v;
+ 
++    // The reader acknowledges each received block by toggling DTR, and the peer's writer stays
++    // blocked until that arrives as a DSR edge. Logged uncapped: an absent toggle is the failure.
++    bool dtr = !!(v & CR_DTR);
++    if (dtr != m_lastDtrLevel) {
++        m_lastDtrLevel = dtr;
++        g_system->printf("SIO1-DIAG t=%10.3f cyc=%llu DTR %d->%d (toggle #%u) pc=%08x ctrl=%04x\n", diagMs(),
++                         (unsigned long long)diagCycle(), !dtr, dtr, ++m_nDtrToggles, g_emulator->m_cpu->m_regs.pc, v);
++    }
++
++    if (diagBudget(m_nCtrlWrites, "CTRL write")) {
++        g_system->printf(
++            "SIO1-DIAG t=%10.3f cyc=%llu game wrote CTRL=%04x [TXEN=%d DTR=%d RXEN=%d RTS=%d ACK=%d RESET=%d "
++            "RXIRQEN=%d TXIRQEN=%d] stat=%04x\n",
++            diagMs(), (unsigned long long)diagCycle(), v, !!(v & CR_TXEN), !!(v & CR_DTR), !!(v & CR_RXEN),
++            !!(v & CR_RTS), !!(v & CR_ACK), !!(v & CR_RESET), !!(v & CR_RXIRQEN), !!(v & CR_TXIRQEN), m_regs.status);
++    }
++
+     if (m_regs.control & CR_ACK) {
+         m_regs.control &= ~CR_ACK;
+         m_regs.status &= ~(SR_PARITYERR | SR_RXOVERRUN | SR_FRAMINGERR | SR_IRQ);
+@@ -272,12 +540,21 @@ void PCSX::SIO1::writeCtrl16(uint16_t v) {
+ 
+     if (m_regs.control & CR_RESET) {
+         m_regs.status &= ~SR_IRQ;
+-        m_regs.status |= (SR_TXRDY | SR_TXRDY2);
++        m_txHold.clear();
++        updateTxReady();
+         m_regs.mode = 0;
+         m_regs.control = 0;
+         m_regs.baud = 0;
+         m_regs.data = 0;
+         if (m_sio1fifo.isA<Fifo>()) {
++            size_t lost = m_sio1fifo->size();
++            if (lost) {
++                m_rxBytesLostToReset += lost;
++                g_system->printf(
++                    "SIO1-DIAG t=%10.3f cyc=%llu RX LOSS: CR_RESET discarded %zu unread bytes (ctrl write=%04x, "
++                    "cumulative lost=%u of %u accepted)\n",
++                    diagMs(), (unsigned long long)diagCycle(), lost, v, m_rxBytesLostToReset, m_nRxAccepted);
++            }
+             m_sio1fifo.asA<Fifo>()->reset();
+         }
+ 
+@@ -286,6 +563,14 @@ void PCSX::SIO1::writeCtrl16(uint16_t v) {
+ 
+     if (!(m_regs.control & CR_RXEN)) {
+         if (m_sio1fifo.isA<Fifo>()) {
++            size_t lost = m_sio1fifo->size();
++            if (lost) {
++                m_rxBytesLostToRxen += lost;
++                g_system->printf(
++                    "SIO1-DIAG t=%10.3f cyc=%llu RX LOSS: RXEN cleared, discarded %zu unread bytes (ctrl write=%04x, "
++                    "cumulative lost=%u of %u accepted)\n",
++                    diagMs(), (unsigned long long)diagCycle(), lost, v, m_rxBytesLostToRxen, m_nRxAccepted);
++            }
+             m_sio1fifo.asA<Fifo>()->reset();
+         }
+     }
+@@ -294,10 +579,44 @@ void PCSX::SIO1::writeCtrl16(uint16_t v) {
+     g_emulator->m_mem->writeHardwareRegister<0x105a, uint16_t>(m_regs.control);
+ }
+ 
++// The transmitter accepts a byte whenever the holding buffer has room. CTS decides when a held
++// byte reaches the wire, not whether the program may write one: refusing the write stalls a
++// program that polls TXRDY before every byte, and dropping it destroys traffic outright.
++void PCSX::SIO1::updateTxReady() {
++    if (m_txHold.size() < kTxHoldDepth) {
++        m_regs.status |= (SR_TXRDY | SR_TXRDY2);
++    } else {
++        m_regs.status &= ~(SR_TXRDY | SR_TXRDY2);
++    }
++}
++
++// The peer asserts RTS only while it is inside a read call, so CTS marks the window in which the
++// far end is actually listening. Releasing held bytes exactly then preserves write ordering and
++// keeps them out of a receive FIFO that has no read armed to consume them.
++void PCSX::SIO1::flushTxHold() {
++    while (!m_txHold.empty() && (m_regs.status & SR_CTS)) {
++        m_regs.data = m_txHold.front();
++        m_txHold.pop_front();
++        transmitData();
++    }
++    updateTxReady();
++}
++
+ void PCSX::SIO1::writeData8(uint8_t v) {
+     m_regs.data = v;
+-    if (isTransmitReady()) {
+-        transmitData();
++    if (diagBudget(m_nDataWrites, "DATA write") || !isTransmitReady()) {
++        g_system->printf(
++            "SIO1-DIAG t=%10.3f cyc=%llu game wrote DATA=%02x ready=%d [TXEN=%d CTS=%d DSR=%d TXRDY2=%d] ctrl=%04x "
++            "stat=%04x\n",
++            diagMs(), (unsigned long long)diagCycle(), v, isTransmitReady(), !!(m_regs.control & CR_TXEN),
++            !!(m_regs.status & SR_CTS), !!(m_regs.status & SR_DSR), !!(m_regs.status & SR_TXRDY2), m_regs.control,
++            m_regs.status);
++    }
++    // Accept the byte whenever the transmitter is enabled; it goes out now if the far end is
++    // listening, otherwise it waits in order for CTS. Never discarded.
++    if (m_regs.control & CR_TXEN) {
++        m_txHold.push_back(v);
++        flushTxHold();
+     }
+     g_emulator->m_mem->writeHardwareRegister<0x1050, uint8_t>(m_regs.data);
+ }
+@@ -317,4 +636,11 @@ void PCSX::SIO1::calcCycleCount() {
+     if (m_regs.baud * reload <= 0) return;
+     m_baudRate = g_emulator->m_psxClockSpeed / (m_regs.baud * reload);
+     m_cycleCount = g_emulator->m_psxClockSpeed / (m_baudRate * 8);
++    if (m_cycleCount != m_lastLoggedCycleCount) {
++        g_system->printf(
++            "SIO1-DIAG t=%10.3f cyc=%llu BAUD baud reg=%04x mode=%04x reload=%d -> %llu baud, %llu cycles/byte\n",
++            diagMs(), (unsigned long long)diagCycle(), m_regs.baud, m_regs.mode, reload,
++            (unsigned long long)m_baudRate, (unsigned long long)m_cycleCount);
++        m_lastLoggedCycleCount = m_cycleCount;
++    }
+ }
+diff --git a/src/core/sio1.h b/src/core/sio1.h
+index 0af0f707..c4bdcadd 100644
+--- a/src/core/sio1.h
++++ b/src/core/sio1.h
+@@ -21,7 +21,9 @@
+ 
+ #include <stdint.h>
+ 
++#include <chrono>
+ #include <compare>
++#include <deque>
+ #include <string>
+ 
+ #include "core/psxemulator.h"
+@@ -75,7 +77,22 @@ class SIO1 {
+     void poll() {
+         if (fifoError()) return;
+         if (m_sio1Mode == SIO1Mode::Protobuf) {
++            pumpTransport();
++            m_msgsThisDrain = 0;
++            m_lineChangedThisDrain = false;
++            m_rxBytesThisDrain = 0;
++            // Bytes become available at the rate the program configured via SIO_BAUD/SIO_MODE,
++            // not at the rate the network happens to deliver them. A receiver cannot bank idle
++            // time: the wire carries at most one byte per baud period, and nothing beyond the
++            // hardware FIFO's depth can be pending, so unused credit older than that is dropped.
++            uint64_t now = diagCycle();
++            uint64_t per = m_cycleCount ? m_cycleCount : 1;
++            uint64_t backlog = per * kRxFifoDepth;
++            if (now > m_lastRxDeliverCycle + backlog) m_lastRxDeliverCycle = now - backlog;
++            m_rxBytesAllowed = (now - m_lastRxDeliverCycle) / per;
+             sio1StateMachine();
++            if (m_msgsThisDrain > 1) logDrain();
++            watchLinkBaseline();
+         } else {
+             if (m_sio1fifo->size() >= 1) {
+                 receiveCallback();
+@@ -85,6 +102,7 @@ class SIO1 {
+ 
+     void reset() {
+         if (m_sio1fifo.isA<Fifo>()) m_sio1fifo.asA<Fifo>()->reset();
++        m_txHold.clear();
+         m_regs.data = 0;
+         m_regs.status = (SR_TXRDY | SR_TXRDY2 | SR_DSR | SR_CTS);
+         m_regs.mode = 0;
+@@ -193,20 +211,64 @@ class SIO1 {
+         m_flowControl.xts = (m_regs.control & CR_RTS);
+     }
+ 
+-    inline void setDsr(bool value) {
+-        if (value) {
+-            m_regs.status |= SR_DSR;
+-        } else {
+-            m_regs.status &= ~SR_DSR;
+-        }
+-    }
+-    inline void setCts(bool value) {
+-        if (value) {
+-            m_regs.status |= SR_CTS;
+-        } else {
+-            m_regs.status &= ~SR_CTS;
+-        }
+-    }
++    void setDsr(bool value);
++    void setCts(bool value);
++
++    // Diagnostics. Purely observational: nothing here feeds back into emulated behaviour.
++    // Every counter that gates a log line is reported when it saturates, so an absent event
++    // is never ambiguous with a silently truncated one.
++    void logDrain();
++    void logStatRead();
++    void watchLinkBaseline();
++    // Retaliation's link driver keeps two independent descriptors, one per direction. Each is
++    // {active, buffer, remaining, dsrLatch}; only the write side uses +0xC. A transfer can only
++    // advance while the peer is inside the opposite call, so both are needed to see the phase.
++    static constexpr uint32_t kLinkStateAddr = 0x801f85dc;      // write descriptor
++    static constexpr uint32_t kReadStateAddr = 0x801f85ec;      // read descriptor
++    static constexpr uint32_t kLinkConfigAddr = 0x801f85d2;     // bits 0x300 select the block size
++    uint32_t m_lastLinkState[4] = {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff};
++    uint32_t m_lastReadState[4] = {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff};
++    bool m_lastLinkBaselineDsr = false;
++    bool m_lastDtrLevel = false;
++    unsigned m_nDtrToggles = 0;
++    static uint64_t diagCycle();
++    static bool diagBudget(unsigned &counter, const char *what);
++
++    static constexpr uint64_t kRxFifoDepth = 8;  // PSX SIO receive FIFO, in bytes
++    static constexpr unsigned kLinkStallUs = 400;             // wall time to wait on a blocked peer
++    static constexpr uint64_t kPollingWindowCycles = 8000;    // "recently read SIO_STAT", ~4 hsyncs
++    uint64_t m_lastStatReadCycle = 0;
++    static constexpr size_t kTxHoldDepth = 8;    // bytes accepted while the far end is not listening
++
++    // Bytes written while CTS is low, waiting for the peer to enter a read. Holding them keeps the
++    // program's write ordering intact without putting them on the wire early.
++    std::deque<uint8_t> m_txHold;
++
++    unsigned m_msgsThisDrain = 0;
++    bool m_lineChangedThisDrain = false;
++    unsigned m_rxBytesThisDrain = 0;
++    uint64_t m_rxBytesAllowed = 0;
++    uint64_t m_lastRxDeliverCycle = 0;
++    uint64_t m_lastLoggedCycleCount = 0;
++    unsigned m_statReads = 0;         // times the game read SIO_STAT
++    unsigned m_statReadsWithDsr = 0;  // ...of those, how many observed DSR high
++    unsigned m_statReadsWithCts = 0;
++    uint16_t m_lastLoggedStat = 0xffff;
++    uint16_t m_lastLoggedStatCtrl = 0xffff;
++    unsigned m_statRepeats = 0;
++    // Edge bookkeeping: how long each input line was held, and whether the game looked at it.
++    uint64_t m_dsrRiseCycle = 0;
++    unsigned m_dsrRiseStatReads = 0;
++    uint64_t m_ctsRiseCycle = 0;
++    unsigned m_ctsRiseStatReads = 0;
++    unsigned m_nCtrlWrites = 0;
++    unsigned m_nDataWrites = 0;
++    unsigned m_nDataReads = 0;
++    unsigned m_nTxMsg = 0;
++    unsigned m_nRxMsg = 0;
++    unsigned m_nRxAccepted = 0;
++    unsigned m_rxBytesLostToReset = 0;
++    unsigned m_rxBytesLostToRxen = 0;
+ 
+     enum {
+         // Status Flags
+@@ -249,7 +311,10 @@ class SIO1 {
+ 
+     inline void scheduleInterrupt(uint32_t eCycle) { g_emulator->m_cpu->scheduleInterrupt(PSXINT_SIO1, eCycle); }
+ 
++    void pumpTransport();
+     void updateStat();
++    void updateTxReady();
++    void flushTxHold();
+     void transmitData();
+     bool isTransmitReady();
+ 
+diff --git a/src/support/uvfile.cc b/src/support/uvfile.cc
+index 2a14a6e9..491598cb 100644
+--- a/src/support/uvfile.cc
++++ b/src/support/uvfile.cc
+@@ -820,6 +820,10 @@ PCSX::UvFifo::UvFifo(const std::string_view address, unsigned port) : File(File:
+ void PCSX::UvFifo::startRead(uv_tcp_t *tcp) {
+     tcp->data = this;
+     m_tcp = tcp;
++    // These streams carry a few bytes at a time in a strict request/response pattern. Left to
++    // Nagle, each small write waits on the peer's delayed acknowledgement of the previous one,
++    // which costs tens to hundreds of milliseconds per exchange.
++    uv_tcp_nodelay(m_tcp, 1);
+     uv_read_start(
+         reinterpret_cast<uv_stream_t *>(m_tcp),
+         [](uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {

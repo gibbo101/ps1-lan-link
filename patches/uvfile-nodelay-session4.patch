@@ -1,0 +1,15 @@
+diff --git a/src/support/uvfile.cc b/src/support/uvfile.cc
+index 2a14a6e9..491598cb 100644
+--- a/src/support/uvfile.cc
++++ b/src/support/uvfile.cc
+@@ -820,6 +820,10 @@ PCSX::UvFifo::UvFifo(const std::string_view address, unsigned port) : File(File:
+ void PCSX::UvFifo::startRead(uv_tcp_t *tcp) {
+     tcp->data = this;
+     m_tcp = tcp;
++    // These streams carry a few bytes at a time in a strict request/response pattern. Left to
++    // Nagle, each small write waits on the peer's delayed acknowledgement of the previous one,
++    // which costs tens to hundreds of milliseconds per exchange.
++    uv_tcp_nodelay(m_tcp, 1);
+     uv_read_start(
+         reinterpret_cast<uv_stream_t *>(m_tcp),
+         [](uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
