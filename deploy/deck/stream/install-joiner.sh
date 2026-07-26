@@ -23,6 +23,9 @@ ssh "deck@$HOST" 'command -v python3 >/dev/null' || { echo "[joiner] python3 mis
 
 ssh "deck@$HOST" "mkdir -p $REMOTE/stream"
 scp -q "$HERE/stream-join.sh" "$HERE/pad-forward.py" "deck@$HOST:$REMOTE/stream/"
+# The player is optional: a Deck without it falls back to ffplay, which is why this does not fail
+# the install when the binary has not been built yet.
+[ -x "$HERE/player/ps1-join-player" ] && scp -q "$HERE/player/ps1-join-player" "deck@$HOST:$REMOTE/stream/"
 ssh "deck@$HOST" "chmod +x $REMOTE/stream/stream-join.sh $REMOTE/stream/pad-forward.py"
 
 # Written rather than copied, so the address is recorded on the machine that has to use it.

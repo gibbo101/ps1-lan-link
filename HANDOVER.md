@@ -182,12 +182,35 @@ It fails structurally: the backlog collects in *ffmpeg's* socket buffer, where n
 can skip it, so a one-second startup delay stayed one second behind for the whole session —
 **59 frames in flight, flat**. A player must own its socket to be able to drop.
 
-**Design B — the player owns the socket and decodes with libavcodec.** Drains the socket every pass,
-decodes everything, draws only the newest frame. It **consumes at roughly half the source rate** and
-the backlog grows without bound — 137 → 741 frames over 20 s. Ruled out as causes: vsync (tested
-off), fullscreen (tested windowed). **Unexplained, and this is where the next session should start.**
-Suspect the read/drain loop in `ps1-join-player.c` before suspecting decode, which is free at this
-resolution.
+**Design B — the player owns the socket and decodes with libavcodec. This is the one that works.**
+It drains the socket every pass, decodes everything it finds, and draws only the newest frame, so it
+cannot accumulate. Measured on Deck 1 against a paced 60 fps source: **718 of 720 frames decoded,
+about two frames outstanding** — roughly 33 ms, which is the floor for a 60 fps stream.
+
+Getting there took three real bugs, all of which looked like "the player is too slow":
+
+1. **`avcodec_receive_frame()` unrefs its target before doing anything else**, so the call that ends
+   the drain loop by returning `EAGAIN` wipes the frame the previous call just produced. Every
+   presented frame was 0x0 — the player had never displayed anything, and `SDL_CreateTexture` was
+   failing and being retried every iteration. Decode into a scratch frame and `av_frame_move_ref()`
+   the newest one out of the way.
+2. **`av_parser_parse2` buffers according to how the input is chunked.** Fed the whole stream as one
+   burst it emitted every frame; fed one frame per read — which is exactly what a live 60 fps source
+   looks like — it emitted **one in three**, and the loss is silent. Access units are now split
+   directly (`next_au_start()`); the parser is not used at all.
+3. **A packet rejected with `EAGAIN` was being dropped**, losing whole frames invisibly. It is now
+   retried after draining.
+
+**The measurement that found it:** logging bytes read alongside frames decoded. The player had read
+470856 bytes — essentially every byte of the 720 frames sent — while decoding only 226. That ruled
+out the network, the sender, decode cost and the renderer in one line, and pointed straight at
+parsing. Before that, three sessions of theories (vsync, fullscreen, frame threading, software
+renderer) had all been wrong.
+
+**Still to do:** it is only proven on Deck 1 against a synthetic stream. It has **not** been run
+against a real host, and Deck 2 was offline (idle-suspended) when this landed, so the joiner there
+still has ffplay. `stream-join.sh` prefers the player when the binary is present and falls back to
+ffplay otherwise, so deploying is just `install-joiner.sh`.
 
 **Tried and reverted — do not repeat without measuring latency first:**
 

@@ -32,6 +32,23 @@
 
 #define READ_CHUNK 65536
 
+
+// Finds the start of the next access unit at or after `from`, or -1. An access unit begins at a
+// start code introducing a parameter set, an access-unit delimiter, or the first slice of a picture
+// - and the first slice is the one whose first_mb_in_slice is zero, which as a ue(v) is the single
+// bit 1, so it shows up as the top bit of the byte after the NAL header.
+static long next_au_start(const uint8_t *buf, size_t len, size_t from) {
+    for (size_t i = from; i + 6 <= len; i++) {
+        if (buf[i] || buf[i + 1] || buf[i + 2] != 0 || buf[i + 3] != 1) {
+            if (!(buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 0 && buf[i + 3] == 1)) continue;
+        }
+        unsigned nal = buf[i + 4] & 0x1F;
+        if (nal == 7 || nal == 8 || nal == 9) return (long)i;
+        if ((nal == 1 || nal == 5) && (buf[i + 5] & 0x80)) return (long)i;
+    }
+    return -1;
+}
+
 static int connect_to(const char *host, const char *port) {
     struct addrinfo hints, *res, *p;
     memset(&hints, 0, sizeof(hints));
@@ -139,16 +156,33 @@ int main(int argc, char **argv) {
     // The console's pixels are not square; the picture is 4:3 whatever the window is.
     SDL_RenderSetLogicalSize(renderer, 640, 480);
 
+    // Which renderer SDL actually chose is load-bearing, not cosmetic: falling back to the software
+    // one means every frame is colour-converted and upscaled on the CPU, which is enough on its own
+    // to stop the player keeping up with a 60 fps source.
+    SDL_RendererInfo info;
+    if (SDL_GetRendererInfo(renderer, &info) == 0) {
+        fprintf(stderr, "[player] renderer=%s accelerated=%d vsync=%d\n", info.name,
+                (info.flags & SDL_RENDERER_ACCELERATED) != 0,
+                (info.flags & SDL_RENDERER_PRESENTVSYNC) != 0);
+    }
+
     SDL_Texture *texture = NULL;
     int tex_w = 0, tex_h = 0;
 
     AVPacket *packet = av_packet_alloc();
+    // Two frames, not one. avcodec_receive_frame() unrefs its target before it does anything else,
+    // so the call that ends the drain loop by returning EAGAIN wipes the frame the previous call
+    // just produced. Whatever is going to be drawn has to be moved out of the way first.
     AVFrame *frame = av_frame_alloc();
+    AVFrame *newest = av_frame_alloc();
     uint8_t *chunk = malloc(READ_CHUNK);
     uint8_t *pending = NULL;
     size_t pending_len = 0;
 
     unsigned long long decoded = 0, presented = 0;
+    unsigned long long us_decode = 0, us_present = 0;
+    unsigned long long bytes_in = 0, iterations = 0;
+    const Uint64 perf_hz = SDL_GetPerformanceFrequency();
     Uint32 last_report = SDL_GetTicks();
     bool running = true;
 
@@ -179,51 +213,65 @@ int main(int argc, char **argv) {
                 break;
             }
             first = false;
+            bytes_in += (size_t)got;
 
-            pending = realloc(pending, pending_len + (size_t)got);
+            // The parser reads ahead of the buffer it is given, so it must have zeroed padding
+            // after the data; without it, access-unit boundaries are misdetected and frames are
+            // silently lost rather than decoded.
+            pending = realloc(pending, pending_len + (size_t)got + AV_INPUT_BUFFER_PADDING_SIZE);
             memcpy(pending + pending_len, chunk, (size_t)got);
             pending_len += (size_t)got;
+            memset(pending + pending_len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
 
-            uint8_t *cursor = pending;
-            size_t left = pending_len;
-            while (left > 0) {
-                uint8_t *data = NULL;
-                int size = 0;
-                int used = av_parser_parse2(parser, ctx, &data, &size, cursor, (int)left,
-                                            AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
-                if (used <= 0) break;
-                cursor += used;
-                left -= (size_t)used;
-                if (size <= 0) continue;
-                packet->data = data;
-                packet->size = size;
-                if (avcodec_send_packet(ctx, packet) == 0) {
-                    // Every frame is decoded; only the last survives to be drawn.
+            Uint64 t_decode0 = SDL_GetPerformanceCounter();
+            // Access units are split here rather than by av_parser, which buffers according to
+            // how the input happens to be chunked: fed the same stream in one burst it emitted
+            // every frame, but fed it one frame per read - which is exactly what a live 60 fps
+            // source does - it emitted one in three.
+            size_t consumed = 0;
+            for (;;) {
+                long first = next_au_start(pending, pending_len, consumed);
+                if (first < 0) break;
+                long second = next_au_start(pending, pending_len, (size_t)first + 4);
+                if (second < 0) break;  // the unit is not complete yet
+                packet->data = pending + first;
+                packet->size = (int)(second - first);
+                for (;;) {
+                    int sent_rc = avcodec_send_packet(ctx, packet);
                     while (avcodec_receive_frame(ctx, frame) == 0) {
                         decoded++;
+                        av_frame_unref(newest);
+                        av_frame_move_ref(newest, frame);
                         have_frame = true;
                     }
+                    if (sent_rc != AVERROR(EAGAIN)) break;
                 }
+                consumed = (size_t)second;
             }
-            memmove(pending, cursor, left);
-            pending_len = left;
+            memmove(pending, pending + consumed, pending_len - consumed);
+            pending_len -= consumed;
+            us_decode += (SDL_GetPerformanceCounter() - t_decode0) * 1000000 / perf_hz;
         }
+        iterations++;
         if (!running) break;
         if (!have_frame) continue;
 
-        if (!texture || tex_w != frame->width || tex_h != frame->height) {
+        if (newest->width <= 0 || newest->height <= 0) continue;
+        if (!texture || tex_w != newest->width || tex_h != newest->height) {
             if (texture) SDL_DestroyTexture(texture);
             texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_IYUV,
-                                        SDL_TEXTUREACCESS_STREAMING, frame->width, frame->height);
-            tex_w = frame->width;
-            tex_h = frame->height;
+                                        SDL_TEXTUREACCESS_STREAMING, newest->width, newest->height);
+            tex_w = newest->width;
+            tex_h = newest->height;
             fprintf(stderr, "[player] stream is %dx%d\n", tex_w, tex_h);
         }
-        SDL_UpdateYUVTexture(texture, NULL, frame->data[0], frame->linesize[0], frame->data[1],
-                             frame->linesize[1], frame->data[2], frame->linesize[2]);
+        Uint64 t_present0 = SDL_GetPerformanceCounter();
+        SDL_UpdateYUVTexture(texture, NULL, newest->data[0], newest->linesize[0], newest->data[1],
+                             newest->linesize[1], newest->data[2], newest->linesize[2]);
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, NULL, NULL);
         SDL_RenderPresent(renderer);
+        us_present += (SDL_GetPerformanceCounter() - t_present0) * 1000000 / perf_hz;
         presented++;
 
         // Frames in flight - what the sender has sent minus this count - is the only latency figure
@@ -231,7 +279,9 @@ int main(int argc, char **argv) {
         // player's exit measures its window teardown as much as its buffer.
         Uint32 now = SDL_GetTicks();
         if (now - last_report >= 250) {
-            fprintf(stderr, "SHOWN %llu %llu\n", presented, decoded);
+            fprintf(stderr,
+                    "SHOWN %llu %llu decode_ms=%llu present_ms=%llu bytes=%llu iters=%llu\n",
+                    presented, decoded, us_decode / 1000, us_present / 1000, bytes_in, iterations);
             fflush(stderr);
             last_report = now;
         }
@@ -244,6 +294,7 @@ int main(int argc, char **argv) {
     SDL_DestroyWindow(window);
     SDL_Quit();
     av_frame_free(&frame);
+    av_frame_free(&newest);
     av_packet_free(&packet);
     av_parser_close(parser);
     avcodec_free_context(&ctx);

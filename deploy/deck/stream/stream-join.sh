@@ -71,6 +71,18 @@ stop_audio() { [ -n "$AUDIO_PID" ] && kill "$AUDIO_PID" 2>/dev/null; }
 trap 'stop_audio; cleanup' EXIT INT TERM
 
 echo "[join] playing tcp://$HOST:$PORT"
+
+# The bespoke player is preferred because it has no clock and no queue: it drains the socket every
+# pass, decodes all of it and draws only the newest frame, so it sits about two frames behind the
+# host and cannot accumulate. ffplay is kept as the fallback for a Deck that has not had the player
+# deployed yet - set PLAYER=ffplay to force it.
+PLAYER="${PLAYER:-auto}"
+if [ "$PLAYER" != "ffplay" ] && [ -x "$HERE/ps1-join-player" ]; then
+  echo "[join] using the bespoke player"
+  exec "$HERE/ps1-join-player" "tcp://$HOST:$PORT"
+fi
+
+echo "[join] using ffplay"
 # -framerate matters more than it looks. A bare H.264 stream carries no timing at all, so the
 # demuxer falls back to 25 fps: frames arrive at 60 a second and are paced out at 25, the backlog
 # grows for as long as the session lasts, and every button press waits behind it.
