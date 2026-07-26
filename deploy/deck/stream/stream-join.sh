@@ -56,6 +56,7 @@ fi
 # raw PCM paced by this machine's own sound card. Every attempt to carry both in one container ended
 # with the player reporting "no reference clock" and spending its time syncing instead of playing.
 AUDIO_PORT="${AUDIO_PORT:-6692}"
+FPS="${FPS:-60}"
 
 AUDIO_PID=""
 if command -v aplay >/dev/null && command -v socat >/dev/null; then
@@ -70,7 +71,10 @@ stop_audio() { [ -n "$AUDIO_PID" ] && kill "$AUDIO_PID" 2>/dev/null; }
 trap 'stop_audio; cleanup' EXIT INT TERM
 
 echo "[join] playing tcp://$HOST:$PORT"
+# -framerate matters more than it looks. A bare H.264 stream carries no timing at all, so the
+# demuxer falls back to 25 fps: frames arrive at 60 a second and are paced out at 25, the backlog
+# grows for as long as the session lasts, and every button press waits behind it.
 ffplay -hide_banner -loglevel warning \
-  -f h264 -flags low_delay -fflags nobuffer -framedrop \
+  -f h264 -framerate "$FPS" -flags low_delay -fflags nobuffer -framedrop \
   -autoexit -fs -window_title "PS1 LAN Link" \
   "tcp://$HOST:$PORT"

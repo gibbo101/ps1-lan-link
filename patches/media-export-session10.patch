@@ -1,5 +1,5 @@
 diff --git a/src/core/psxemulator.cc b/src/core/psxemulator.cc
-index b75f8b0f..67acc077 100644
+index b75f8b0f..a25dc4cf 100644
 --- a/src/core/psxemulator.cc
 +++ b/src/core/psxemulator.cc
 @@ -50,6 +50,7 @@ extern "C" {
@@ -10,15 +10,20 @@ index b75f8b0f..67acc077 100644
  #include "supportpsx/adpcmlua.h"
  #include "supportpsx/assembler.h"
  #include "supportpsx/binlua.h"
-@@ -178,6 +179,7 @@ void PCSX::Emulator::shutdown() {
+@@ -177,6 +178,12 @@ void PCSX::Emulator::shutdown() {
+ }
  
  void PCSX::Emulator::vsync() {
-     m_gpu->vblank();
++    // Before vblank(), not after. vblank() is where the display flips to the buffer the game is
++    // about to draw into, so sampling after it catches that buffer mid-write — during FMV, which
++    // holds each picture for four vblanks, that produced four good frames followed by four black
++    // ones, over and over. Taken here, the screenshot is the picture that was actually on screen
++    // for the frame just finished.
 +    exportFrame();
+     m_gpu->vblank();
      g_system->m_eventBus->signal<Events::GPU::VSync>({});
      g_system->update(true);
- 
-@@ -186,6 +188,27 @@ void PCSX::Emulator::vsync() {
+@@ -186,6 +193,27 @@ void PCSX::Emulator::vsync() {
      }
  }
  

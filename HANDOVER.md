@@ -10,6 +10,110 @@ menu slowness, and the loopback story (session 4) for *how the link works*.
 
 ---
 
+## 🔴 START HERE — session 10c. The joiner works but does not feel good, and why
+
+**Read this section before touching anything.** A joiner exists, a two-Deck match has been played
+through it, and the host side is untouched and fine. The joining side has three complaints from
+The tester that are *still open*, and this section exists mostly to stop the next session repeating a
+day of wrong diagnoses.
+
+### State on 2026-07-26 midday
+
+Both Decks on emulator md5 `352dee3f36715a684097103039038c66`. Deck 1 hosts (`PS1 LAN Link`),
+Deck 2 joins (`PS1 LAN Link — Join`). Both need relaunching after the last deploy.
+
+| Complaint | Status |
+|---|---|
+| in-game audio crackling | **fixed** — confirmed by the tester ("sound however fixed") |
+| FMV flashing | **85% reduced, not gone** — root cause found, see below |
+| input lag on the joiner | **open, and the real remaining problem** |
+| picture stretched on Deck 2 | fix deployed, unverified — `-aspect 4:3` |
+
+### The FMV flashing — what it actually was, after four wrong answers
+
+**The emulator's own export emits black frames during FMV.** Consecutive frames measured straight
+off the export socket, before any encoder or network:
+
+```
+0 10 10 10 10 0 0 0 0 7 7 7 7 0 0 0 0 7 7 7 7 0 0 0 0 8 8 8 8 0
+```
+
+Four real frames, four or five black, repeating — 52% of frames black. FMV runs at ~15 fps so each
+picture is held for four vblanks, and `exportFrame()` was sampling **after** `m_gpu->vblank()`,
+which is where the display flips to the buffer the game is about to draw into. Moving the sample to
+*before* `vblank()` pairs the screenshot with the display position that was actually on screen:
+
+| | before | after |
+|---|---|---|
+| black frames during FMV | 52% | 26% |
+| brightness swings >25 | 228 | 34 |
+
+**Still not zero, so there is more to find here.** The remaining alternation has runs as short as
+three frames.
+
+**Why this took all day, and the lesson:** every "the export is clean" measurement was taken on a
+*static title screen*, where it genuinely is clean (601 consecutive frames, dead flat). The fault
+only appears during FMV. Four confident diagnoses were built on that gap and all were wrong —
+encoder rebuilds, a misread black-frame claim, mpegts clock skew, and bitrate starvation. Each was
+a real defect, each was fixed, and none of them was the flashing. **Measure the failing case, not a
+convenient one.**
+
+### Input lag — what is ruled OUT by measurement
+
+Do not re-investigate these; each was measured, not assumed:
+
+| Stage | Measured | Verdict |
+|---|---|---|
+| emulator → stream-host | 0.3–1.6 ms frame age | not it |
+| pad hop (TCP → HTTP → Lua override) | 0.24–4 ms | not it |
+| host CPU | instA+instB at 100% / 60 fps, load 0.9 of 8 | not it |
+| delivered frame rate | 60.0 fps over wifi | not it |
+| wifi | 0% loss, 12.8–48.8 ms RTT | contributes ~11–25 ms one way |
+
+What is left is the **encode → decode → display** path, and specifically **ffplay's picture queue,
+which is fixed at three frames (~50 ms) and cannot be tuned away with flags.** The next real step is
+a small purpose-built player bundled in the package — the tester has explicitly approved bundling bespoke
+components ("if moonlight / sunshine are packaged in there and are custom bespoke versions for our
+use case only im ok with that").
+
+**Tried and reverted — do not repeat without measuring latency first:**
+
+- **intra-refresh** (`-x264-params intra-refresh=1`) to remove the once-a-second keyframe burst:
+  made input lag *worse* in play and did not affect the flashing. Reverted.
+- **ffplay latency flags** (`-probesize 32`, `-avioflags direct`): starve the decoder, picture tears
+  and flashes. Reverted.
+- **`-infbuf`**: unbounded buffer, latency accumulates and never returns. Removed, stays removed.
+
+### Constraints from the tester, which rule out the obvious alternative
+
+- **Game Mode only.** Desktop Mode is not acceptable for the product.
+- **One app package**, players just launch it. Bundling bespoke builds of anything is fine.
+- **No sudo.** He asked directly whether users would need to run a sudo command, and they would —
+  so `modprobe vkms` is out as a shipping requirement, and with it the Sunshine route.
+
+**Sunshine/Moonlight cannot solve the host side here**, and this is worth understanding before
+proposing it again: Sunshine captures a *display*. In Game Mode gamescope shows one app fullscreen
+(instA), and instB is deliberately headless via `-no-ui`, so it has no pixels on any display to
+capture. The session-7 setup the tester remembers as working well was Desktop Mode with both windows on
+one screen — which is why Deck 2 saw a split screen then.
+
+### Traps that cost hours this session — all self-inflicted
+
+1. **`stream-host` serves one video client, so every test connection kicks the player off** — and
+   each reconnect restarts the encoder. Testing against a live session actively corrupts it. Use a
+   separate emulator instance on the PC instead.
+2. **`pkill -f <pattern>` matches the SSH command running it**, killing the session mid-script with
+   no output. Anchor it: `pkill -f "^python3 .*stream-host"`.
+3. **`setsid` over SSH is reaped by logind on SteamOS.** Hit twice. Always `systemd-run --user`.
+4. **Block-buffered stdout makes journal timestamps lie** — lines appear minutes late, so the
+   emulator looked like it was streaming while a probe saw nothing. Always `stdbuf -o0 -e0`.
+5. **A deploy can silently not land.** Deck 1 ran the previous binary for a whole test round while
+   Deck 2 had the new one. `install.sh` md5-verifies — trust that, not the fact that it printed.
+6. **Sampling every Nth frame hides per-frame artefacts.** A `means[::20]` view produced a confident,
+   completely wrong "every other frame is black" claim. Look at consecutive frames.
+
+---
+
 ## 🕹️ Session 10b — the joiner exists and a real two-Deck match was played through it
 
 **The tester played it on two Decks on 2026-07-26.** Deck 1 hosted (his verdict on that side: *"deck 1

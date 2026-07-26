@@ -107,12 +107,16 @@ class Client:
         return self.sock is not None
 
     def send(self, data):
+        # A blocking sendall here would hold the lock for as long as the peer refuses to read, and
+        # a joiner that quits leaves exactly that: a socket whose buffer fills and never drains.
+        # The next connection then blocks in attach() waiting for this lock, so quitting the joiner
+        # made it impossible to rejoin. A send timeout bounds the stall and drops the dead peer.
         with self.lock:
             if self.sock is None:
                 return
             try:
                 self.sock.sendall(data)
-            except OSError as error:
+            except (OSError, socket.timeout) as error:
                 log(f"joiner video connection ended: {error}")
                 try:
                     self.sock.close()
@@ -156,6 +160,7 @@ class AudioServer:
             except OSError:
                 return
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            conn.settimeout(3.0)
             log(f"joiner audio connected from {addr[0]}")
             with self.lock:
                 if self.sock is not None:
@@ -172,7 +177,7 @@ class AudioServer:
                 return
             try:
                 self.sock.sendall(payload)
-            except OSError as error:
+            except (OSError, socket.timeout) as error:
                 log(f"joiner audio connection ended: {error}")
                 try:
                     self.sock.close()
@@ -215,9 +220,27 @@ class Encoder:
             "-thread_queue_size", "64",
             "-f", "rawvideo", "-pix_fmt", PIX_FMT[fmt], "-s", f"{width}x{height}",
             "-r", str(args.fps), "-i", "pipe:0",
-            "-vf", f"scale={args.out_width}:{args.out_height}:flags=bilinear",
-            "-c:v", args.vcodec, "-preset", "ultrafast", "-tune", "zerolatency",
-            "-b:v", args.bitrate, "-g", str(args.fps), "-pix_fmt", "yuv420p",
+            # Encode at the console's own resolution and let the joiner's player scale to its
+            # screen. Upscaling here cost 2.3x the pixels for no extra detail, and those bits are
+            # exactly what the encoder was running out of.
+            #
+            # Quality-targeted rather than a fixed bitrate: a hard 8 Mbit cap starved the encoder
+            # during FMV, so quality collapsed across each second and snapped back at every
+            # keyframe - a 1 Hz pulse, seen as flashing and as the picture "losing quality".
+            # veryfast rather than ultrafast because the host has the headroom (the encoder used
+            # under a fifth of one core) and it buys a lot of quality per bit.
+            "-c:v", args.vcodec, "-preset", "veryfast", "-tune", "zerolatency",
+            "-crf", str(args.crf), "-maxrate", args.bitrate, "-bufsize", args.bufsize,
+            # Intra-refresh was tried here to remove the once-a-second keyframe burst. It made the
+            # input lag measurably worse in play and did not touch the flashing, which turned out to
+            # be black frames coming out of the emulator. Reverted; do not re-add it without first
+            # measuring latency with and without.
+            "-g", str(args.fps), "-pix_fmt", "yuv420p",
+            # The console's 512x240 is not square-pixel: it is meant to fill a 4:3 screen. Encoding
+            # at native size is right, but the display aspect has to be declared or the player
+            # stretches the coded shape across the panel. Declaring it costs nothing; upscaling to
+            # 640x480 to imply it cost 2.3x the pixels.
+            "-aspect", args.aspect,
             # A bare H.264 elementary stream: no container, so no clock to negotiate and nothing
             # for the player to wait on. Frames are decoded and shown as they arrive, which is the
             # whole point when the picture is being played rather than watched.
@@ -340,6 +363,7 @@ def serve_video(args, client):
         except OSError:
             return
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        conn.settimeout(3.0)
         log(f"joiner video connected from {addr[0]}")
         client.attach(conn)
 
@@ -387,7 +411,10 @@ def main():
     parser.add_argument("--control-port", type=int, default=6681, help="instB's loopback HTTP surface")
     parser.add_argument("--pad-handler", default="padstate", help="Lua handler applying the pad state")
     parser.add_argument("--vcodec", default="libx264")
-    parser.add_argument("--bitrate", default="8M")
+    parser.add_argument("--bitrate", default="12M", help="ceiling, not a target")
+    parser.add_argument("--bufsize", default="2M")
+    parser.add_argument("--crf", type=int, default=20)
+    parser.add_argument("--aspect", default="4:3")
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--out-width", type=int, default=640)
     parser.add_argument("--out-height", type=int, default=480)
