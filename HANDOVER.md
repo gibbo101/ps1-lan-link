@@ -90,6 +90,10 @@ need. Raw export is now ~53 MB/s on the **unix socket only**; the LAN carries h2
    had SIGKILLed after a `systemctl stop` timeout. Check the unit is *alive* before believing what
    it reports. Also: **audio flowing proves nothing about whether the emulator is running** — the
    SPU callback runs on the host audio clock even when emulation is stopped.
+5. **A Deck cannot be suspended over SSH.** `systemctl suspend` returns *"Interactive authentication
+   required"* because polkit grants it only to an active local session, and `sudo` needs the
+   password that is deliberately not recorded here. Suspending remotely is not available; the Decks
+   reach their own idle sleep instead.
 
 ---
 
