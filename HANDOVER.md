@@ -207,10 +207,27 @@ out the network, the sender, decode cost and the renderer in one line, and point
 parsing. Before that, three sessions of theories (vsync, fullscreen, frame threading, software
 renderer) had all been wrong.
 
-**Still to do:** it is only proven on Deck 1 against a synthetic stream. It has **not** been run
-against a real host, and Deck 2 was offline (idle-suspended) when this landed, so the joiner there
-still has ffplay. `stream-join.sh` prefers the player when the binary is present and falls back to
-ffplay otherwise, so deploying is just `install-joiner.sh`.
+**Then it met a real stream and judders badly.** In a real match it decoded 8688 frames and displayed
+**776** — about one in eleven — with `[h264] no frame!` throughout. Not CPU: decode is 0.33 ms a
+frame and present 1.7 ms, so it is idle most of the time.
+
+**The cause, and the fourth instance of the same mistake.** `next_au_start()` only recognised
+**four-byte** start codes. x264 emits the four-byte form for parameter sets and the first slice of a
+picture and the **three-byte** form for the rest, so access units were merged and the decoder was
+handed garbage. The synthetic `testsrc` stream it was validated against happened not to mix them —
+the convenient case again, exactly as with the static title screen and FMV.
+
+**A fix is written and compiles but is UNVERIFIED** — both start-code lengths are now handled. It has
+not been run against a real stream, because capturing one locally needs the emulator plus
+`stream-host` on the PC and that run had not been got working when the session ended.
+
+**Current state on Deck 2: deliberately disabled.** The binary is `ps1-join-player.disabled` and
+`join.conf` carries `PLAYER=ffplay`, so the joiner is on the known-working path. Re-enable by
+renaming the binary back and removing that line.
+
+**Verify against a real stream before trusting it.** Capture one by running the emulator with
+`-stream-socket` and pointing `stream-host.py` at it, then saving the TCP output to a file — do not
+validate against `testsrc` again.
 
 **Tried and reverted — do not repeat without measuring latency first:**
 
@@ -234,10 +251,46 @@ and pacing with `-re` measures against a start time that is not ffmpeg's t=0. Wh
 that **neither encoder accumulates** — the apparent x264 drift is a startup transient. Build the
 reference into the probe before believing any figure from it.
 
-### Deck 2 "feels sluggish" — answered
+### Deck 2 "feels sluggish" — answered, and it is NOT the stream
 
 The tester, asked whether it is sluggish generally or only while joining: **"only when joining the
-stream."** So it is this pipeline, not that Deck's health, and it needs no separate investigation.
+stream."** That pointed at the pipeline. **It was the wrong conclusion, and the logs say so.**
+
+**START THE NEXT SESSION HERE.** Measured from one real match, both instances on Deck 1, linked over
+**loopback** — no network between them:
+
+| | instA (visible, server) | instB (headless, streamed) |
+|---|---|---|
+| SPEED | **99.9–100.4%** | **87.0–89.7%** |
+| emuFps | 59.9–60.3 | **52.2–53.8** |
+| wall in the SIO1 stall | 39.3% | **83.6%** |
+| uv loop runs per 2 s | 2.27 M | **5.07 M** |
+
+**The link's two sides are asymmetric, and the client pays double.** The tester saw this directly: the
+selector on the streamed side pulses visibly slower than on the host's, because the blue side's
+*emulated time* really is running 12% slow. It is not a display artefact and no player work touches
+it — **both players are playing a 52 fps game.**
+
+**Proof it is not the stream, from instB's own log earlier in the same session:**
+
+```
+SPEED 99.84% emuFps=59.91 stalls=0 stallMs=0.0 (0.0% of wall) tx=0
+```
+
+Full speed with zero stalling on the menus, collapsing to 87% only once link traffic starts
+(`stalls≈17000`, `tx≈3600`). And `stream-host` logged `in 60.2 fps` *with a joiner attached*, so
+encoding and streaming sustain 60 fps.
+
+**The untried lever:** `PCSX_LINK_LOCAL_ACK` — session 6's "never wait on the peer's *emulation*,
+only on the network" fix — exists in `sio1.cc:130` but **`ps1-link-gamemode.sh` has never set it**.
+Every session the tester has played ran without it. Wire it as an opt-in in `gamemode.conf` before
+anything else, and expect to have to back it out: four previous attempts at the stall budget each
+broke the link somewhere else (see the session-6 table).
+
+**The tester's benchmark, worth taking seriously:** *"we had no judder / input lag with moonlight /
+sunshine."* That was the session-7 Desktop Mode setup. It proves a client can feel right, so the
+joiner's judder is a bug rather than a ceiling — but it does not rescue the host side, because
+Sunshine captures a display and instB has no pixels on one.
 
 ### Constraints from the tester, which rule out the obvious alternative
 

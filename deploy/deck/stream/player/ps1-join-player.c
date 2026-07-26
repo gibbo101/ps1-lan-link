@@ -33,18 +33,32 @@
 #define READ_CHUNK 65536
 
 
-// Finds the start of the next access unit at or after `from`, or -1. An access unit begins at a
-// start code introducing a parameter set, an access-unit delimiter, or the first slice of a picture
-// - and the first slice is the one whose first_mb_in_slice is zero, which as a ue(v) is the single
-// bit 1, so it shows up as the top bit of the byte after the NAL header.
+// Finds the start of the next access unit at or after `from`, or -1.
+//
+// Start codes come in both lengths. x264 emits the four-byte form for parameter sets and the first
+// slice of a picture and the three-byte form for the rest, so a splitter that only knows about
+// four-byte codes merges access units and hands the decoder garbage. The synthetic stream this was
+// first tested against happened not to mix them, which is exactly the sort of convenient case this
+// project keeps being caught by.
+//
+// An access unit begins at a parameter set, an access-unit delimiter, or the first slice of a
+// picture - and the first slice is the one whose first_mb_in_slice is zero, which as a ue(v) is the
+// single bit 1, so it is the top bit of the byte after the NAL header.
 static long next_au_start(const uint8_t *buf, size_t len, size_t from) {
-    for (size_t i = from; i + 6 <= len; i++) {
-        if (buf[i] || buf[i + 1] || buf[i + 2] != 0 || buf[i + 3] != 1) {
-            if (!(buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 0 && buf[i + 3] == 1)) continue;
+    for (size_t i = from; i + 5 <= len; i++) {
+        if (buf[i] != 0 || buf[i + 1] != 0) continue;
+        size_t nal_at;
+        if (buf[i + 2] == 1) {
+            nal_at = i + 3;
+        } else if (buf[i + 2] == 0 && i + 6 <= len && buf[i + 3] == 1) {
+            nal_at = i + 4;
+        } else {
+            continue;
         }
-        unsigned nal = buf[i + 4] & 0x1F;
+        if (nal_at + 1 >= len) return -1;
+        unsigned nal = buf[nal_at] & 0x1F;
         if (nal == 7 || nal == 8 || nal == 9) return (long)i;
-        if ((nal == 1 || nal == 5) && (buf[i + 5] & 0x80)) return (long)i;
+        if ((nal == 1 || nal == 5) && (buf[nal_at + 1] & 0x80)) return (long)i;
     }
     return -1;
 }
@@ -232,7 +246,7 @@ int main(int argc, char **argv) {
             for (;;) {
                 long first = next_au_start(pending, pending_len, consumed);
                 if (first < 0) break;
-                long second = next_au_start(pending, pending_len, (size_t)first + 4);
+                long second = next_au_start(pending, pending_len, (size_t)first + 3);
                 if (second < 0) break;  // the unit is not complete yet
                 packet->data = pending + first;
                 packet->size = (int)(second - first);
