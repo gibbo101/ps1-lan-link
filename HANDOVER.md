@@ -96,19 +96,80 @@ Do not re-investigate these; each was measured, not assumed:
 | delivered frame rate | 60.0 fps over wifi | not it |
 | wifi | 0% loss, 12.8–48.8 ms RTT | contributes ~11–25 ms one way |
 
-What is left is the **encode → decode → display** path, and specifically **ffplay's picture queue,
-which is fixed at three frames (~50 ms) and cannot be tuned away with flags.** The next real step is
-a small purpose-built player bundled in the package — the tester has explicitly approved bundling bespoke
-components ("if moonlight / sunshine are packaged in there and are custom bespoke versions for our
-use case only im ok with that").
+### Input lag — measured on Deck 2, and it is ffplay (session 11)
+
+**ffplay holds 116–166 ms of video, on loopback, with no network in the path.** That is the input
+lag. It was measured on the joining Deck itself, which had never been instrumented before.
+
+**The instrument — `drain-test.py`.** A live stream's latency is simply whatever the player has
+buffered, so: pace a pre-encoded h264 stream into the player at exactly 60 fps over TCP, cut the
+connection, and time how long the player keeps going before it runs dry. No screen capture, no
+camera, no clock shared with anything. Controls first, because the harness has to be proved before
+its numbers mean anything:
+
+| Player | Held when the stream was cut |
+|---|---|
+| raw socket sink (reads and discards) | **8 ms** — this is the harness's own overhead |
+| `ffplay -nodisp` (demux + decode, no presentation) | **64 ms** |
+| **`ffplay` as shipped** | **116–166 ms** |
+
+**No flag moves it.** Every variant lands in the same band, and the two values it takes are 50 ms
+apart, which is the picture queue's three frames — the differences between configurations are
+inside the noise:
+
+| Variant | Held |
+|---|---|
+| shipped (`-framedrop`) | 116 ms |
+| `-vf setpts=0` | 116 ms |
+| `-probesize 32 -analyzeduration 0` | 116 ms |
+| no `-framedrop` | 166 ms |
+| `-sync ext` | 166 ms |
+| `-threads 1` / `2` / `4` / `auto` | 166 ms in all four |
+
+So **"that family is exhausted" is now a measurement rather than an opinion**, and the remaining
+step is the purpose-built player the tester already approved bundling ("if moonlight / sunshine are
+packaged in there and are custom bespoke versions for our use case only im ok with that").
+
+**Two hypotheses killed by this rig — do not spend time on either:**
+
+- **It does not accumulate.** Cut after 5 s, 10 s and 19 s and the figure is the same. The theory
+  that a bare h264 stream with a synthesised 60 fps timeline drifts unboundedly against a live
+  source is wrong; the buffer is a fixed depth, not a growing one.
+- **It is not frame-threading.** 116–166 ms is close enough to seven frames that libavcodec's
+  `threads - 1` output delay looked like the whole answer on an 8-core Deck. Forcing `-threads 1`
+  changes nothing.
+
+**Hardware decode is not the win either.** Deck 2 decodes 1200 frames of 512x240 h264 in 0.38 s in
+software and 0.44 s through VAAPI — about 3000 fps either way. At this resolution decode is free,
+and the "no software H.264 decoder on that Deck" note in `f57dc90` refers to its *GStreamer*, not to
+ffmpeg. Deck 2 does have `vaapi` and a world-writable `/dev/dri/renderD128`.
 
 **Tried and reverted — do not repeat without measuring latency first:**
 
 - **intra-refresh** (`-x264-params intra-refresh=1`) to remove the once-a-second keyframe burst:
   made input lag *worse* in play and did not affect the flashing. Reverted.
 - **ffplay latency flags** (`-probesize 32`, `-avioflags direct`): starve the decoder, picture tears
-  and flashes. Reverted.
+  and flashes. Reverted. (The drain rig now says they do not help the latency either.)
 - **`-infbuf`**: unbounded buffer, latency accumulates and never returns. Removed, stays removed.
+
+### The encoder — what is and is not known
+
+`h264_vaapi` **works on both Decks and needs no sudo** (`/dev/dri/renderD128` is world-writable), so
+hardware encode was never actually unavailable. Correcting the record: session 7's
+`encoder = software` was **not** a finding that hardware encode fails on a Deck. Sunshine had
+auto-selected `hevc_vulkan` and negotiated YUV 4:4:4 that Moonlight could not decode. **VAAPI was
+never tried anywhere in this project's history.**
+
+**Absolute encode latency remains unmeasured.** Two attempts this session produced numbers not worth
+quoting: feeding ffmpeg from a Python thread measures the input pipe queue as much as the encoder,
+and pacing with `-re` measures against a start time that is not ffmpeg's t=0. What both agree on is
+that **neither encoder accumulates** — the apparent x264 drift is a startup transient. Build the
+reference into the probe before believing any figure from it.
+
+### Deck 2 "feels sluggish" — answered
+
+The tester, asked whether it is sluggish generally or only while joining: **"only when joining the
+stream."** So it is this pipeline, not that Deck's health, and it needs no separate investigation.
 
 ### Constraints from the tester, which rule out the obvious alternative
 
