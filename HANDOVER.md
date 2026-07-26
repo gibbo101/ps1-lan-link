@@ -32,7 +32,31 @@ on the FMV, and audio crackling. Everything below is the diagnosis of those, and
 `STREAM=0` in `gamemode.conf` turns streaming off for couch play. Nothing is encoded until a joiner
 actually connects, so a solo session pays nothing.
 
-### The one that mattered: never rebuild the encoder
+### The export format is a bandwidth budget, and getting it wrong undid everything
+
+**Normalising to 640x480 RGB24 made the joiner worse, and the numbers said so plainly.** It took the
+export from ~14 MB/s to ~53 MB/s, the Python host could not drain that on a Deck, and the result was:
+
+```
+in 49.0 fps                                 <- emulator dropping video, consumer too slow
+encoder drops a=21825 (climbing ~600/sec)   <- audio thrown away wholesale: the crackling
+```
+
+The fixed format is now **512x240 BGR555** — the console's own colour depth and its widest common
+mode — which is ~14 MB/s again, and the *encoder* does the upscale to 640x480 on the way to h264,
+for free. 24bpp FMV frames are folded down to 15-bit, so the intro bands slightly; that is a better
+trade than a stream nothing can drain. Measured on the Deck after the change:
+
+| | before | after |
+|---|---|---|
+| frames reaching the host | 49.0 fps | **60.0 fps** |
+| audio packets dropped | ~600/sec | **~1/sec** |
+| over wifi to a PC | — | **1200 frames in 20 s = 60.0 fps** |
+
+**The lesson worth keeping: constancy of format and cost of format are separate decisions, and this
+project's consumer is Python on a handheld.** Pick the size and depth from bytes per second first.
+
+### The one that mattered less than it looked: never rebuild the encoder
 
 The PS1 changes display mode as it runs — 320x240 24bpp for FMV, 512x240 16bpp for menus. The host
 originally rebuilt ffmpeg for each change, and **that single decision caused three of the four

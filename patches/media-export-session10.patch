@@ -167,10 +167,10 @@ index b67f0458..6cd4edd4 100644
          for (unsigned i = 0; i < STREAMS; i++) {
 diff --git a/src/support/mediastream.cc b/src/support/mediastream.cc
 new file mode 100644
-index 00000000..5cfaea58
+index 00000000..a978d999
 --- /dev/null
 +++ b/src/support/mediastream.cc
-@@ -0,0 +1,499 @@
+@@ -0,0 +1,497 @@
 +/*
 +
 +MIT License
@@ -445,7 +445,7 @@ index 00000000..5cfaea58
 +        PacketHeader header = {};
 +        header.magic = kPacketMagic;
 +        header.type = static_cast<uint8_t>(PacketType::Video);
-+        header.format = static_cast<uint8_t>(VideoFormat::RGB888);
++        header.format = static_cast<uint8_t>(kOutFormat);
 +        header.width = kOutWidth;
 +        header.height = kOutHeight;
 +        header.aux = 0;
@@ -464,7 +464,7 @@ index 00000000..5cfaea58
 +// thread. Nearest-neighbour is deliberate: the point is a constant stream a consumer never has to
 +// re-negotiate, and a sharper filter here would cost the host CPU that the two emulators need.
 +void PCSX::MediaStream::normalize(const VideoItem &item, std::vector<uint8_t> &out) {
-+    out.resize(static_cast<size_t>(kOutWidth) * kOutHeight * 3);
++    out.resize(static_cast<size_t>(kOutWidth) * kOutHeight * 2);
 +    const auto *src = static_cast<const uint8_t *>(item.data.data());
 +    const bool rgb24 = item.format == VideoFormat::RGB888;
 +    const unsigned bytesPerPixel = rgb24 ? 3 : 2;
@@ -490,23 +490,21 @@ index 00000000..5cfaea58
 +    for (unsigned y = 0; y < kOutHeight; y++) {
 +        const unsigned sy = y * item.height / kOutHeight;
 +        const uint8_t *srcRow = src + static_cast<size_t>(sy) * srcStride;
-+        uint8_t *dstRow = out.data() + static_cast<size_t>(y) * kOutWidth * 3;
++        uint8_t *dstRow = out.data() + static_cast<size_t>(y) * kOutWidth * 2;
 +        for (unsigned x = 0; x < kOutWidth; x++) {
 +            const unsigned sx = columns[x];
++            uint16_t pixel;
 +            if (rgb24) {
-+                const uint8_t *pixel = srcRow + sx * 3;
-+                dstRow[x * 3 + 0] = pixel[0];
-+                dstRow[x * 3 + 1] = pixel[1];
-+                dstRow[x * 3 + 2] = pixel[2];
++                // The 24bpp display mode only appears during FMV. Folding it down to the console's
++                // own 15-bit colour keeps one format on the wire for the price of banding on the
++                // intro, which is a better trade than a stream the consumer cannot drain.
++                const uint8_t *rgb = srcRow + sx * 3;
++                pixel = (rgb[0] >> 3) | ((rgb[1] >> 3) << 5) | ((rgb[2] >> 3) << 10);
 +            } else {
-+                // BGR555: five bits per channel with red in the low bits, so the top three bits of
-+                // each byte carry the value and the low three are filled from it to keep white white.
-+                const uint16_t pixel = srcRow[sx * 2] | (srcRow[sx * 2 + 1] << 8);
-+                const uint8_t r = (pixel >> 0) & 0x1f, g = (pixel >> 5) & 0x1f, b = (pixel >> 10) & 0x1f;
-+                dstRow[x * 3 + 0] = (r << 3) | (r >> 2);
-+                dstRow[x * 3 + 1] = (g << 3) | (g >> 2);
-+                dstRow[x * 3 + 2] = (b << 3) | (b >> 2);
++                pixel = srcRow[sx * 2] | (srcRow[sx * 2 + 1] << 8);
 +            }
++            dstRow[x * 2 + 0] = pixel & 0xff;
++            dstRow[x * 2 + 1] = pixel >> 8;
 +        }
 +    }
 +}
@@ -672,10 +670,10 @@ index 00000000..5cfaea58
 +#endif
 diff --git a/src/support/mediastream.h b/src/support/mediastream.h
 new file mode 100644
-index 00000000..3e9aa7ac
+index 00000000..d9bf7eb9
 --- /dev/null
 +++ b/src/support/mediastream.h
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,203 @@
 +/*
 +
 +MIT License
@@ -819,13 +817,19 @@ index 00000000..3e9aa7ac
 +    void trimOut();
 +    uint64_t nowUs() const;
 +
-+    // Every frame leaves at this size and in RGB24, whatever the PS1 was displaying. The console
-+    // changes resolution and bit depth as it runs — 320x240 24bpp for FMV, 512x240 16bpp for menus
-+    // — and a consumer that has to follow those changes must rebuild its decoder each time. That
-+    // rebuild is what produced flashing, gaps in the audio and resets of the stream's clock. The
-+    // conversion runs on the exporter thread, so the emulation thread still pays nothing.
-+    static constexpr uint16_t kOutWidth = 640;
-+    static constexpr uint16_t kOutHeight = 480;
++    // Every frame leaves at this size and in this format, whatever the PS1 was displaying. The
++    // console changes resolution and bit depth as it runs — 320x240 24bpp for FMV, 512x240 16bpp
++    // for menus — and a consumer that has to follow those changes must rebuild its decoder each
++    // time, which produces flashing, gaps in the audio and resets of the stream's clock.
++    //
++    // The size and format are chosen for bytes per second, not for fidelity. 512x240 in the
++    // console's own 16bpp is ~15 MB/s, which the consumer drains comfortably; normalising to
++    // 640x480 RGB24 instead was ~53 MB/s and the consumer could not keep up, so frames and audio
++    // were dropped and the result was worse than doing nothing. Upscaling belongs in the encoder,
++    // which does it for free on the way to h264.
++    static constexpr uint16_t kOutWidth = 512;
++    static constexpr uint16_t kOutHeight = 240;
++    static constexpr VideoFormat kOutFormat = VideoFormat::BGR555;
 +
 +    // A frame every 16.6 ms against a consumer that reads promptly: three slots absorb a scheduling
 +    // hiccup, and anything past that is better dropped than queued into latency.

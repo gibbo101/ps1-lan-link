@@ -179,7 +179,9 @@ class Encoder:
         threading.Thread(target=self._open_audio, daemon=True).start()
 
         self.video_q = queue.Queue(maxsize=3)
-        self.audio_q = queue.Queue(maxsize=64)
+        # Deep enough to ride out a scheduling hiccup at ~690 packets a second. The old depth of 64
+        # was under a tenth of a second, so any stall at all was audible.
+        self.audio_q = queue.Queue(maxsize=2048)
         self.threads = [
             threading.Thread(target=self._feed_video, daemon=True),
             threading.Thread(target=self._feed_audio, daemon=True),
@@ -207,15 +209,27 @@ class Encoder:
                 return
 
     def _feed_audio(self):
+        """Drains the whole queue per write.
+
+        The emulator emits ~690 audio packets a second, each a fraction of a millisecond of sound.
+        Writing and flushing each one separately is ~1400 syscalls a second, which this cannot keep
+        up with — the queue then overflows and the discarded packets are heard as crackling. They
+        are contiguous samples, so joining them costs nothing and changes nothing.
+        """
         while running and self.proc.poll() is None:
             try:
-                payload = self.audio_q.get(timeout=0.5)
+                chunks = [self.audio_q.get(timeout=0.5)]
             except queue.Empty:
                 continue
+            while True:
+                try:
+                    chunks.append(self.audio_q.get_nowait())
+                except queue.Empty:
+                    break
             if self.audio_fd is None:
                 continue
             try:
-                self.audio_fd.write(payload)
+                self.audio_fd.write(b"".join(chunks))
                 self.audio_fd.flush()
             except (BrokenPipeError, ValueError, OSError):
                 return
