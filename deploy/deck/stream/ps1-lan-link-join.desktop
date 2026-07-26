@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=PS1 LAN Link — Join
+Comment=Watch and play the second side of a PS1 link match hosted on another Deck
+Exec=/home/deck/ps1-lan-link/stream/stream-join.sh
+Path=/home/deck/ps1-lan-link/stream
+Icon=applications-games
+Terminal=false
+Categories=Game;

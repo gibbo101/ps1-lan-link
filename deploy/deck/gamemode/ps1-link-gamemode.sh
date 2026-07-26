@@ -40,6 +40,14 @@ PORT=6699
 WEB_A=6680          # instA  control/verification surface
 WEB_B=6681          # instB  control/verification surface — the only way to drive a headless pad
 
+# Stage 2 streaming. instB publishes frames and audio to a unix socket; stream-host encodes them
+# and is the only thing here that accepts a LAN connection. It carries media and pad input only —
+# never the control surface above, which stays on loopback. Set STREAM=0 for couch play, where
+# there is no joiner and the encoder would be spending a Deck's headroom on nobody.
+STREAM_SOCK="${XDG_RUNTIME_DIR:-/tmp}/ps1-instb-stream.sock"
+STREAM_PORT=6690
+STREAM_INPUT_PORT=6691
+
 # Launched from Game Mode there is no terminal, so everything goes to a log we can read over SSH.
 exec > >(tee "$LOG") 2>&1
 echo "[gm] === launch $(date '+%F %T') ==="
@@ -55,6 +63,7 @@ GAME="${1:-${GAME:-}}"
 PAD_ID="${PAD_ID:-0}"
 FULLSCREEN="${FULLSCREEN:-1}"
 CTL="${CTL_ENV:-${CTL:-1}}"   # set 0 to leave the HTTP control surface off
+STREAM="${STREAM:-1}"         # set 0 for couch play — no joiner, so nothing to encode for
 
 # Errors go to stderr, not stdout: resolve_game runs inside a command substitution, and a message on
 # stdout there is captured into the variable instead of reaching the player.
@@ -191,17 +200,20 @@ PY
 
 # ---------------------------------------------------------------- launch
 
-PID_A=""; PID_B=""
+PID_A=""; PID_B=""; PID_STREAM=""
 cleanup() {
   trap - EXIT INT TERM   # a signal runs this and then EXIT would run it again
   echo "[gm] cleaning up"
+  [ -n "$PID_STREAM" ] && kill "$PID_STREAM" 2>/dev/null
   for p in $PID_B $PID_A; do kill "$p" 2>/dev/null; done
   for _ in $(seq 1 40); do
     { [ -n "$PID_A" ] && kill -0 "$PID_A" 2>/dev/null; } || { [ -n "$PID_B" ] && kill -0 "$PID_B" 2>/dev/null; } || break
     sleep 0.25
   done
   for p in $PID_B $PID_A; do kill -9 "$p" 2>/dev/null; done
+  [ -n "$PID_STREAM" ] && kill -9 "$PID_STREAM" 2>/dev/null
   pkill -f "$BIN" 2>/dev/null
+  rm -f "$STREAM_SOCK"
   echo "[gm] exit: $(pgrep -cf "$BIN") emulator processes left, port $PORT held: $(ss -tln 2>/dev/null | grep -c ":$PORT ")"
 }
 trap cleanup EXIT INT TERM
@@ -233,6 +245,13 @@ resume() {  # $1 = port
 CTL_ARGS=()
 [ "$CTL" = 1 ] && CTL_ARGS=(-dofile "$GM/instb-ctl.lua")
 
+# Only instB streams. instA is what the host player is looking at on this screen.
+STREAM_ARGS=()
+if [ "$STREAM" = 1 ]; then
+  rm -f "$STREAM_SOCK"
+  STREAM_ARGS=(-stream-socket "$STREAM_SOCK")
+fi
+
 # instA is the SIO1 server, so it has to be listening before instB tries to connect.
 echo "[gm] starting instA (visible, server)…"
 launch instA "${CTL_ARGS[@]}"; PID_A=$LAUNCHED_PID
@@ -244,7 +263,7 @@ done
 ss -tln 2>/dev/null | grep -q ":$PORT " || die "instA never listened on $PORT"
 
 echo "[gm] starting instB (headless, client)…"
-launch instB -no-ui "${CTL_ARGS[@]}"; PID_B=$LAUNCHED_PID
+launch instB -no-ui "${CTL_ARGS[@]}" "${STREAM_ARGS[@]}"; PID_B=$LAUNCHED_PID
 for _ in $(seq 1 120); do
   [ "$(ss -tn 2>/dev/null | grep -c ":$PORT ")" -ge 2 ] && break
   kill -0 "$PID_B" 2>/dev/null || die "instB died during startup — see $GM/instB/run.log"
@@ -282,6 +301,20 @@ if [ "$CTL" = 1 ]; then
     CTL=0 exec "$0" "$GAME"
   fi
 fi
+# The streamer attaches to instB's export socket and waits. It builds no encoder until a joiner
+# actually connects, so a solo or couch session pays nothing for it being here.
+if [ "$STREAM" = 1 ]; then
+  if [ -x "$DIR/stream/stream-host.py" ]; then
+    python3 "$DIR/stream/stream-host.py" \
+      --export-socket "$STREAM_SOCK" --port "$STREAM_PORT" --input-port "$STREAM_INPUT_PORT" \
+      --control-port "$WEB_B" > "$GM/stream-host.log" 2>&1 &
+    PID_STREAM=$!
+    echo "[gm] streamer pid=$PID_STREAM — joiners connect to $(hostname -I 2>/dev/null | awk '{print $1}'):$STREAM_PORT"
+  else
+    echo "[gm] WARNING: STREAM=1 but stream/stream-host.py is missing — no joiner can connect"
+  fi
+fi
+
 echo "[gm] running — this script exits when instA does"
 
 # instA's lifetime is the game's lifetime; instB is torn down with it by the trap. instB is watched

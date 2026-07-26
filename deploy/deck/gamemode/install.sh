@@ -34,9 +34,13 @@ else
 fi
 
 echo "[install] copying launcher"
-ssh "deck@$HOST" "mkdir -p $REMOTE/gamemode"
+ssh "deck@$HOST" "mkdir -p $REMOTE/gamemode $REMOTE/stream"
 scp -q "$GM/ps1-link-gamemode.sh" "$GM/instb-ctl.lua" "$GM/pad.sh" "deck@$HOST:$REMOTE/gamemode/"
 ssh "deck@$HOST" "chmod +x $REMOTE/gamemode/ps1-link-gamemode.sh $REMOTE/gamemode/pad.sh"
+
+echo "[install] copying the streamer"
+scp -q "$PD/deploy/deck/stream/stream-host.py" "deck@$HOST:$REMOTE/stream/"
+ssh "deck@$HOST" "chmod +x $REMOTE/stream/stream-host.py"
 
 # The Steam shortcut "PS1 LAN Link" already points at ps1-link.sh. Taking that name over is what
 # lets Stage 1 launch from the existing Game Mode entry without editing Steam's shortcuts.vdf.
