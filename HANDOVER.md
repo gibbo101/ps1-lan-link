@@ -25,38 +25,64 @@ Deck 2 joins (`PS1 LAN Link — Join`). Both need relaunching after the last dep
 | Complaint | Status |
 |---|---|
 | in-game audio crackling | **fixed** — confirmed by the tester ("sound however fixed") |
-| FMV flashing | **85% reduced, not gone** — root cause found, see below |
+| FMV flashing | **fixed at the root** — a 24bpp screenshot read half a megabyte before VRAM |
 | input lag on the joiner | **open, and the real remaining problem** |
 | picture stretched on Deck 2 | fix deployed, unverified — `-aspect 4:3` |
 
-### The FMV flashing — what it actually was, after four wrong answers
+### The FMV flashing — root-caused and fixed (session 11)
 
-**The emulator's own export emits black frames during FMV.** Consecutive frames measured straight
-off the export socket, before any encoder or network:
+**`takeScreenShot()` read 24bpp frames from the wrong base pointer.** `patches/fmv-24bpp-vram-session11.patch`.
 
+VRAM is allocated with slack in front of it, and the framebuffer starts half a megabyte in
+(`src/gpu/soft/gpu.cc`):
+
+```cpp
+m_allocatedVRAM = new uint8_t[(VRAM_HEIGHT * 2) * 1024 + (1024 * 1024)]();
+m_vram = m_allocatedVRAM + 512 * 1024;   // security offset into double sized psx vram!
 ```
-0 10 10 10 10 0 0 0 0 7 7 7 7 0 0 0 0 7 7 7 7 0 0 0 0 8 8 8 8 0
-```
 
-Four real frames, four or five black, repeating — 52% of frames black. FMV runs at ~15 fps so each
-picture is held for four vblanks, and `exportFrame()` was sampling **after** `m_gpu->vblank()`,
-which is where the display flips to the buffer the game is about to draw into. Moving the sample to
-*before* `vblank()` pairs the screenshot with the display position that was actually on screen:
+The 16bpp branch of the screenshot reads `m_vram16`. The **24bpp branch read `m_allocatedVRAM`** —
+that half-megabyte of zero-filled slack. At the 2048-byte row stride the branch itself uses, 512 KB
+is **exactly 256 rows**, so any 24bpp display window with `DisplayPosition.y < 256` reads nothing
+but zeros and exports a **pure black frame**; a window at `y >= 256` lands in real VRAM but 256 rows
+early, on the *other* buffer. 24bpp is exactly FMV mode, and FMV is double-buffered, so the two
+buffers alternate: one exports a picture, the other exports black.
+
+Measured off the export socket, consecutively, on the Retaliation boot sequence:
 
 | | before | after |
 |---|---|---|
-| black frames during FMV | 52% | 26% |
-| brightness swings >25 | 228 | 34 |
+| black frames over a 55 s boot | **59.1%** | **17.1%** |
+| structure during FMV | `n4 B4 n4 B4 n4 B4 …` | no alternation at all |
+| what remains | — | `B523`, `B42` — contiguous loading blacks, genuinely black |
 
-**Still not zero, so there is more to find here.** The remaining alternation has runs as short as
-three frames.
+The `n4 B4` signature is the giveaway: FMV holds each picture for four vblanks, and every second
+picture landed in the buffer that read zeros. The fix is two tokens — `m_allocatedVRAM` → `m_vram`,
+and `startX * 3` → `startX * 2`, because `DisplayPosition.x` is a VRAM halfword coordinate while the
+window's width is in pixels. Verified visually as well as numerically: the Westwood Studios FMV
+exports as a correct, correctly-coloured picture across consecutive frames.
 
-**Why this took all day, and the lesson:** every "the export is clean" measurement was taken on a
-*static title screen*, where it genuinely is clean (601 consecutive frames, dead flat). The fault
-only appears during FMV. Four confident diagnoses were built on that gap and all were wrong —
-encoder rebuilds, a misread black-frame claim, mpegts clock skew, and bitrate starvation. Each was
-a real defect, each was fixed, and none of them was the flashing. **Measure the failing case, not a
-convenient one.**
+This is **upstream PCSX-Redux code, untouched since 2023** — the same fault makes the GUI's
+`Ctrl+PrintScreen` and the web server's screenshot endpoint return black during FMV. Worth
+upstreaming.
+
+**Two corrections to what session 10c recorded**, both of which cost time and should not be
+inherited:
+
+- **"Sample the frame before vblank, not after" (`acab2e4`) did not fix anything.** In a `-no-ui`
+  instance `m_ui` is a `TUI`, and `SoftGPU::vblank()` → `updateDisplay()` returns on its first line
+  when there is no GUI, so it touches no display state at all. Moving `exportFrame()` across it
+  cannot change which pixels are read. The recorded 52% → 26% was variance between two FMV runs;
+  measured again on that same build, the fault was **59.1%**.
+- **Percentages of "black frames over a run" are not comparable between runs** unless the runs cover
+  the same content. Boot black, loading black and FMV black all land in the same number. The
+  run-length structure is the honest measurement, which is why the table above reports it.
+
+**The lesson that produced this, from session 10c:** every "the export is clean" measurement had
+been taken on a *static title screen*, where it genuinely is clean. The fault only appears during
+FMV, and four confident diagnoses were built on that gap — encoder rebuilds, a misread black-frame
+claim, mpegts clock skew, bitrate starvation. Each was a real defect, each was fixed, none was the
+flashing. **Measure the failing case, not a convenient one.**
 
 ### Input lag — what is ruled OUT by measurement
 
