@@ -19,8 +19,12 @@ day of wrong diagnoses.
 
 ### State on 2026-07-26 midday
 
-Both Decks on emulator md5 `352dee3f36715a684097103039038c66`. Deck 1 hosts (`PS1 LAN Link`),
-Deck 2 joins (`PS1 LAN Link — Join`). Both need relaunching after the last deploy.
+Both Decks on emulator md5 `b73661ebfdf49fa4165e02ebe893aa6f` — the session-11 build, with the FMV
+fix — deployed and md5-verified on both on 2026-07-26. Deck 1 hosts (`PS1 LAN Link`), Deck 2 joins
+(`PS1 LAN Link — Join`). **Both need relaunching**; the deploy killed any running instance.
+
+The joiner is **unchanged** and still uses ffplay: the replacement player does not work yet, so
+nothing about input lag has improved. What should be visibly better is the FMV.
 
 | Complaint | Status |
 |---|---|
