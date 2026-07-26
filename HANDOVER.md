@@ -10,6 +10,89 @@ menu slowness, and the loopback story (session 4) for *how the link works*.
 
 ---
 
+## 🕹️ Session 10b — the joiner exists and a real two-Deck match was played through it
+
+**The tester played it on two Decks on 2026-07-26.** Deck 1 hosted (his verdict on that side: *"deck 1
+flawless"*), Deck 2 ran a new "PS1 LAN Link — Join" Steam shortcut showing instB's screen and
+driving it with its own controller. So stage 2 step 2 is met: **a joiner exists and works.**
+
+It is not yet *good*. What he reported, in his words: input lag on the joiner, audio lag, flashing
+on the FMV, and audio crackling. Everything below is the diagnosis of those, and what is fixed.
+
+### What runs it
+
+| Piece | Where | What |
+|---|---|---|
+| `deploy/deck/stream/stream-host.py` | hosting Deck | export socket → ffmpeg h264/aac mpegts → TCP; pad input back via loopback HTTP |
+| `deploy/deck/stream/stream-join.sh` | joining Deck | ffplay fullscreen + pad forwarder, address from `join.conf` |
+| `deploy/deck/stream/pad-forward.py` | joining Deck | reads every real `/dev/input/js*` and sends button state |
+| `deploy/deck/stream/install-joiner.sh` | here | deploys the above and registers the Steam shortcut |
+| `padstate` handler in `instb-ctl.lua` | hosting Deck | whole-pad state in one call |
+
+`STREAM=0` in `gamemode.conf` turns streaming off for couch play. Nothing is encoded until a joiner
+actually connects, so a solo session pays nothing.
+
+### The one that mattered: never rebuild the encoder
+
+The PS1 changes display mode as it runs — 320x240 24bpp for FMV, 512x240 16bpp for menus. The host
+originally rebuilt ffmpeg for each change, and **that single decision caused three of the four
+symptoms**: the decoder re-initialised (flashing), the audio fifo was only fed while an encoder
+existed (gaps and crackling), and each new ffmpeg restarted its timeline at zero on a TCP connection
+the player treats as continuous, so DTS ran backwards. The joiner log said so plainly:
+
+```
+[mpegts] Packet corrupt (stream = 0, dts = 693590)
+[mpegts] DTS 21590 < 693590 out of order
+```
+
+**The fix is in the emulator, not the host:** `MediaStream` now normalises every frame to a fixed
+**640x480 RGB24** on the *exporter thread*, so the wire format is constant and one ffmpeg runs for
+the whole session. Measured after the change, on the Deck:
+
+| | |
+|---|---|
+| Export format across mode changes | **constant**, `sizes=[(640, 480, 1)]` |
+| Encoder rebuilds | **0** |
+| instB | **100.02% / 60.0 fps**, 7–20 µs per frame on the emulation thread |
+| Over wifi, PC pulling from Deck 1 | **1200 frames in 20 s = 60.0 fps** |
+| Frame age at the host | median 0.3–1.6 ms, max 3.4 ms |
+| Deck CPU while streaming | AppRun ~101%, python ~8%, load 0.88 of 8 |
+
+Nearest-neighbour scaling is deliberate — a sharper filter would cost host CPU the two emulators
+need. Raw export is now ~53 MB/s on the **unix socket only**; the LAN carries h264.
+
+### Still wrong, and unverified
+
+- **Input lag on the joiner is not fixed and not explained.** The pad hop is 0.24–4 ms and frames
+  reach the streamer in 0.3–1.6 ms, so it is *not* upstream of ffmpeg. What is left is x264 encode,
+  wifi, and ffplay's own pipeline. **A decoder that was continuously re-syncing also feels like
+  input lag, so the normalisation may have improved it — nobody has held a controller since.**
+  That is the first thing to check next session.
+- Wifi tonight measured **6.7 ms best, 18 ms average, 118 ms max, 3.3% loss** — worse than session
+  7's 7.5 ms. Some of what he felt is the network.
+- `ffplay` may be the wrong player. If latency is still bad with a clean stream, replace it rather
+  than tune more flags — that family is exhausted.
+- stream-host burns ~8% CPU reading and discarding frames when no joiner is attached. It should
+  detach from the export socket instead.
+
+### Traps this session — all four cost real time
+
+1. **`pkill -f <name>` matches the shell running it.** It killed the SSH session mid-script three
+   times, silently, leaving no output and no clue. Anchor the pattern (`^python3 .*stream-host`).
+2. **`setsid` over SSH is reaped by logind on SteamOS** — already in this file for the emulator, and
+   it applies to *everything*. The streamer died with my SSH session and the joiner reported
+   "connection refused". Use `systemd-run --user`.
+3. **Block-buffered stdout makes journal timestamps lie.** Without `stdbuf -o0`, the emulator's log
+   flushes in chunks, so lines appear minutes after the events. This produced a completely false
+   picture: the emulator appeared to be sending video while a probe saw none. Always launch with
+   `stdbuf -o0 -e0` — the Game Mode launcher already does.
+4. **A dying instance looks like a broken feature.** "No video on the Deck" was an instance systemd
+   had SIGKILLed after a `systemctl stop` timeout. Check the unit is *alive* before believing what
+   it reports. Also: **audio flowing proves nothing about whether the emulator is running** — the
+   SPU callback runs on the host audio clock even when emulation is stopped.
+
+---
+
 ## 📺 Session 10 — instB's frames and audio come out; stage 2 step 1 is done
 
 `patches/media-export-session10.patch`. A headless instance now publishes every displayed frame and

@@ -167,10 +167,10 @@ index b67f0458..6cd4edd4 100644
          for (unsigned i = 0; i < STREAMS; i++) {
 diff --git a/src/support/mediastream.cc b/src/support/mediastream.cc
 new file mode 100644
-index 00000000..8b53bf2e
+index 00000000..5cfaea58
 --- /dev/null
 +++ b/src/support/mediastream.cc
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,499 @@
 +/*
 +
 +MIT License
@@ -199,6 +199,7 @@ index 00000000..8b53bf2e
 +
 +#include "support/mediastream.h"
 +
++#include <algorithm>
 +#include <chrono>
 +#include <cstring>
 +
@@ -369,8 +370,8 @@ index 00000000..8b53bf2e
 +    hello.headerSize = sizeof(PacketHeader);
 +    hello.audioRate = m_audioRate.load();
 +    hello.audioChannels = 2;
-+    hello.videoMaxWidth = 1024;
-+    hello.videoMaxHeight = 512;
++    hello.videoMaxWidth = kOutWidth;
++    hello.videoMaxHeight = kOutHeight;
 +
 +    m_clientFd = fd;
 +    m_out.clear();
@@ -437,23 +438,76 @@ index 00000000..8b53bf2e
 +        m_audioPacketsSent++;
 +    }
 +
++    static std::vector<uint8_t> scratch;
 +    for (auto &item : video) {
-+        const uint32_t payloadLen = item.data.size();
++        normalize(item, scratch);
++        const uint32_t payloadLen = static_cast<uint32_t>(scratch.size());
 +        PacketHeader header = {};
 +        header.magic = kPacketMagic;
 +        header.type = static_cast<uint8_t>(PacketType::Video);
-+        header.format = static_cast<uint8_t>(item.format);
-+        header.width = item.width;
-+        header.height = item.height;
++        header.format = static_cast<uint8_t>(VideoFormat::RGB888);
++        header.width = kOutWidth;
++        header.height = kOutHeight;
 +        header.aux = 0;
 +        header.payloadLen = payloadLen;
 +        header.timestampUs = item.timestampUs;
 +
 +        std::vector<uint8_t> packet(sizeof(header) + payloadLen);
 +        std::memcpy(packet.data(), &header, sizeof(header));
-+        std::memcpy(packet.data() + sizeof(header), item.data.data(), payloadLen);
++        std::memcpy(packet.data() + sizeof(header), scratch.data(), payloadLen);
 +        enqueueOut(std::move(packet));
 +        m_videoQueued++;
++    }
++}
++
++// Scales the displayed frame to the fixed export size and expands it to RGB24, on the exporter
++// thread. Nearest-neighbour is deliberate: the point is a constant stream a consumer never has to
++// re-negotiate, and a sharper filter here would cost the host CPU that the two emulators need.
++void PCSX::MediaStream::normalize(const VideoItem &item, std::vector<uint8_t> &out) {
++    out.resize(static_cast<size_t>(kOutWidth) * kOutHeight * 3);
++    const auto *src = static_cast<const uint8_t *>(item.data.data());
++    const bool rgb24 = item.format == VideoFormat::RGB888;
++    const unsigned bytesPerPixel = rgb24 ? 3 : 2;
++    const unsigned srcStride = item.width * bytesPerPixel;
++
++    // A frame smaller than its own geometry claims would be read past its end. Black is a poor
++    // picture; reading someone else's memory to fill it is worse.
++    if (item.data.size() < static_cast<size_t>(srcStride) * item.height) {
++        std::fill(out.begin(), out.end(), 0);
++        return;
++    }
++
++    // The column each output pixel reads from never changes within a frame, so the divisions are
++    // done once per frame rather than once per pixel.
++    static std::vector<unsigned> columns;
++    static unsigned columnsFor = 0;
++    if (columnsFor != item.width) {
++        columns.resize(kOutWidth);
++        for (unsigned x = 0; x < kOutWidth; x++) columns[x] = x * item.width / kOutWidth;
++        columnsFor = item.width;
++    }
++
++    for (unsigned y = 0; y < kOutHeight; y++) {
++        const unsigned sy = y * item.height / kOutHeight;
++        const uint8_t *srcRow = src + static_cast<size_t>(sy) * srcStride;
++        uint8_t *dstRow = out.data() + static_cast<size_t>(y) * kOutWidth * 3;
++        for (unsigned x = 0; x < kOutWidth; x++) {
++            const unsigned sx = columns[x];
++            if (rgb24) {
++                const uint8_t *pixel = srcRow + sx * 3;
++                dstRow[x * 3 + 0] = pixel[0];
++                dstRow[x * 3 + 1] = pixel[1];
++                dstRow[x * 3 + 2] = pixel[2];
++            } else {
++                // BGR555: five bits per channel with red in the low bits, so the top three bits of
++                // each byte carry the value and the low three are filled from it to keep white white.
++                const uint16_t pixel = srcRow[sx * 2] | (srcRow[sx * 2 + 1] << 8);
++                const uint8_t r = (pixel >> 0) & 0x1f, g = (pixel >> 5) & 0x1f, b = (pixel >> 10) & 0x1f;
++                dstRow[x * 3 + 0] = (r << 3) | (r >> 2);
++                dstRow[x * 3 + 1] = (g << 3) | (g >> 2);
++                dstRow[x * 3 + 2] = (b << 3) | (b >> 2);
++            }
++        }
 +    }
 +}
 +
@@ -618,10 +672,10 @@ index 00000000..8b53bf2e
 +#endif
 diff --git a/src/support/mediastream.h b/src/support/mediastream.h
 new file mode 100644
-index 00000000..6f1927b0
+index 00000000..3e9aa7ac
 --- /dev/null
 +++ b/src/support/mediastream.h
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,197 @@
 +/*
 +
 +MIT License
@@ -756,6 +810,7 @@ index 00000000..6f1927b0
 +    };
 +
 +    void run();
++    void normalize(const VideoItem &item, std::vector<uint8_t> &out);
 +    bool acceptClient(int listenFd);
 +    void dropClient(const char *why);
 +    void serialize(std::deque<VideoItem> &video, std::deque<AudioItem> &audio);
@@ -763,6 +818,14 @@ index 00000000..6f1927b0
 +    bool flushOut();
 +    void trimOut();
 +    uint64_t nowUs() const;
++
++    // Every frame leaves at this size and in RGB24, whatever the PS1 was displaying. The console
++    // changes resolution and bit depth as it runs — 320x240 24bpp for FMV, 512x240 16bpp for menus
++    // — and a consumer that has to follow those changes must rebuild its decoder each time. That
++    // rebuild is what produced flashing, gaps in the audio and resets of the stream's clock. The
++    // conversion runs on the exporter thread, so the emulation thread still pays nothing.
++    static constexpr uint16_t kOutWidth = 640;
++    static constexpr uint16_t kOutHeight = 480;
 +
 +    // A frame every 16.6 ms against a consumer that reads promptly: three slots absorb a scheduling
 +    // hiccup, and anything past that is better dropped than queued into latency.

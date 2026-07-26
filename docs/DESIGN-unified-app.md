@@ -185,6 +185,15 @@ Order:
      the emulator deliberately, so its cost is measured separately rather than baked in.
 2. **The crudest possible joiner** — a fullscreen window on the second Deck that decodes and sends
    pad input back through the override path. Config'd address, no discovery.
+   **Done, session 10b**: `deploy/deck/stream/`, launched from its own Steam shortcut, played on two
+   Decks. Two things it settled:
+   - **The export must be one fixed format.** Following the PS1's display-mode changes forces the
+     consumer to rebuild its decoder, and that rebuild — not the network — caused flashing, audio
+     gaps and a stream clock that ran backwards. The emulator now normalises to 640x480 RGB24 on
+     its exporter thread; the encoder is built once per session.
+   - **Encoding is affordable; the player may not be.** The hosting Deck holds 60 fps with the
+     encoder running at ~8% of a core, and the stream arrives over wifi at a full 60 fps. The
+     latency the joining player feels is downstream of that, in ffplay, and is still unmeasured.
 3. **Measure** — end-to-end latency, and whether both emulators still hold 60 fps with an encoder
    running alongside them.
 
