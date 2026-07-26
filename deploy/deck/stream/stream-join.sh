@@ -49,24 +49,28 @@ else
   echo "[join] WARNING: no /dev/input/js* — you will see the game but cannot play it"
 fi
 
-# Everything here trades smoothness for latency, which is the right trade for something being
-# played rather than watched.
+# Video and audio arrive separately and neither waits for the other.
 #
-# There is deliberately no -infbuf: an unbounded input buffer never drops anything, so when the
-# network hiccups the backlog is kept and played late, and the lag it introduces never comes back
-# out. -framedrop lets late frames go instead, which is what keeps the controller feeling attached
-# to the picture. Probing is cut to the minimum because a live stream has nothing to learn from
-# buffering a second of it first.
-# Deliberately empty by default. Cutting the probe size to almost nothing and forcing unbuffered
-# reads leaves the decoder too little to identify the stream with, and the picture tears and
-# flashes rather than arriving sooner. Override for experiments; do not add these back on a hunch.
-LATENCY_ARGS="${LATENCY_ARGS:-}"
+# Video is a bare H.264 stream with no container and no timestamps, so the player decodes and shows
+# each frame as it arrives - there is no clock to lock onto and nothing to buffer against. Audio is
+# raw PCM paced by this machine's own sound card. Every attempt to carry both in one container ended
+# with the player reporting "no reference clock" and spending its time syncing instead of playing.
+AUDIO_PORT="${AUDIO_PORT:-6692}"
+
+AUDIO_PID=""
+if command -v aplay >/dev/null && command -v socat >/dev/null; then
+  socat -u "TCP:$HOST:$AUDIO_PORT" - 2>/dev/null | aplay -q -f S16_LE -r 44100 -c 2 -t raw - &
+  AUDIO_PID=$!
+  echo "[join] audio pid=$AUDIO_PID from $HOST:$AUDIO_PORT"
+else
+  echo "[join] WARNING: aplay or socat missing - no sound"
+fi
+
+stop_audio() { [ -n "$AUDIO_PID" ] && kill "$AUDIO_PID" 2>/dev/null; }
+trap 'stop_audio; cleanup' EXIT INT TERM
 
 echo "[join] playing tcp://$HOST:$PORT"
-# shellcheck disable=SC2086
 ffplay -hide_banner -loglevel warning \
-  -fflags nobuffer -flags low_delay -framedrop \
-  $LATENCY_ARGS \
-  -sync ext -autoexit -fs \
-  -window_title "PS1 LAN Link" \
+  -f h264 -flags low_delay -fflags nobuffer -framedrop \
+  -autoexit -fs -window_title "PS1 LAN Link" \
   "tcp://$HOST:$PORT"

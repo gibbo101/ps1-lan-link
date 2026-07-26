@@ -5,8 +5,13 @@ This is the only process in the project that accepts a connection from the LAN. 
 audio and pad input and nothing else — the emulator's own control surface stays on loopback, and
 the emulator itself never listens on a routable address. Keep it that way.
 
-  instB --(unix socket, raw frames + s16 audio)--> stream-host --(h264/aac mpegts over TCP)--> joiner
+  instB --(unix socket, raw frames + s16 audio)--> stream-host --(bare h264 over TCP)--> joiner
+                                                              --(raw s16 PCM over TCP)--> joiner
   joiner --(pad state over TCP)--> stream-host --(pad overrides over loopback HTTP)--> instB
+
+Video and audio travel on separate connections with no container between them. A container carries
+a clock, and every symptom the joiner had - stutter, crackle, input that felt detached - came from
+players trying to lock onto that clock rather than simply playing what arrived.
 
 Pixels are handed to ffmpeg untouched: the PS1's 16bpp VRAM word is exactly ffmpeg's bgr555le, and
 its 24bpp mode is rgb24, so nothing here converts a pixel. That matters because the Deck has no
@@ -116,6 +121,67 @@ class Client:
                 self.sock = None
 
 
+class AudioServer:
+    """Raw PCM straight to the joiner on its own connection.
+
+    Audio deliberately does not share a container with the video. Putting them together means a
+    container with a clock, and then both ends spend their time negotiating a timeline instead of
+    playing: players reported "no reference clock" and "PCR called too late", and no amount of
+    muxer tuning fixed it. Sent raw, the joiner's sound card paces the audio and the picture is
+    shown on arrival — neither waits for the other.
+
+    44.1 kHz stereo s16 is ~1.4 Mbit/s, which is nothing on a LAN, so there is no reason to encode
+    it and no decoder needed at the far end.
+    """
+
+    def __init__(self, args):
+        self.args = args
+        self.sock = None
+        self.lock = threading.Lock()
+        self.connections = 0
+        self.dropped = 0
+
+    def serve(self):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((self.args.bind, self.args.audio_port))
+        listener.listen(1)
+        listener.settimeout(1.0)
+        log(f"audio listening on {self.args.bind}:{self.args.audio_port}")
+        while running:
+            try:
+                conn, addr = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            log(f"joiner audio connected from {addr[0]}")
+            with self.lock:
+                if self.sock is not None:
+                    try:
+                        self.sock.close()
+                    except OSError:
+                        pass
+                self.sock = conn
+                self.connections += 1
+
+    def send(self, payload):
+        with self.lock:
+            if self.sock is None:
+                return
+            try:
+                self.sock.sendall(payload)
+            except OSError as error:
+                log(f"joiner audio connection ended: {error}")
+                try:
+                    self.sock.close()
+                except OSError:
+                    pass
+                self.sock = None
+                self.dropped += 1
+
+
 class Encoder:
     """One ffmpeg process, serving one input geometry.
 
@@ -141,60 +207,32 @@ class Encoder:
         self.dropped_video = 0
         self.dropped_audio = 0
 
-        # A generation in the name: a replacement encoder must not touch the fifo the outgoing one
-        # is still shutting down around.
         Encoder.generation += 1
-        self.audio_path = os.path.join(args.runtime_dir, f"ps1-stream-audio-{Encoder.generation}.fifo")
-        if os.path.exists(self.audio_path):
-            os.unlink(self.audio_path)
-        os.mkfifo(self.audio_path)
 
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             "-fflags", "nobuffer", "-flags", "low_delay",
             "-thread_queue_size", "64",
-            # Timestamps come from the wall clock, not from counting frames. The emulator runs at
-            # ~60.1 fps, so a fixed 60 fps timeline drifts slower than real time and the player
-            # falls further behind every second — latency that grows instead of settling.
             "-f", "rawvideo", "-pix_fmt", PIX_FMT[fmt], "-s", f"{width}x{height}",
-            "-r", str(args.fps), "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
-            # Video gets wall-clock timestamps, audio does not: audio arrives in bursts, so stamping
-            # it by arrival time produces a jittery clock, and a player syncing to that clock chases
-            # it instead of showing frames.
-            "-thread_queue_size", "512",
-            "-f", "s16le", "-ar", str(args.audio_rate), "-ac", "2", "-i", self.audio_path,
+            "-r", str(args.fps), "-i", "pipe:0",
             "-vf", f"scale={args.out_width}:{args.out_height}:flags=bilinear",
             "-c:v", args.vcodec, "-preset", "ultrafast", "-tune", "zerolatency",
             "-b:v", args.bitrate, "-g", str(args.fps), "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k",
-            "-output_ts_offset", f"{self.ts_offset:.3f}",
-            "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1", "pipe:1",
+            # A bare H.264 elementary stream: no container, so no clock to negotiate and nothing
+            # for the player to wait on. Frames are decoded and shown as they arrive, which is the
+            # whole point when the picture is being played rather than watched.
+            "-bsf:v", "h264_mp4toannexb", "-f", "h264", "pipe:1",
         ]
         log(f"encoder up: {width}x{height} {PIX_FMT[fmt]} -> {args.out_width}x{args.out_height} {args.vcodec}")
         self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
-        # Opening the write end of a fifo blocks until ffmpeg opens the read end, so it happens off
-        # the reader thread. Until then audio is dropped rather than queued into latency.
-        self.audio_fd = None
-        threading.Thread(target=self._open_audio, daemon=True).start()
-
         self.video_q = queue.Queue(maxsize=3)
-        # Deep enough to ride out a scheduling hiccup at ~690 packets a second. The old depth of 64
-        # was under a tenth of a second, so any stall at all was audible.
-        self.audio_q = queue.Queue(maxsize=2048)
         self.threads = [
             threading.Thread(target=self._feed_video, daemon=True),
-            threading.Thread(target=self._feed_audio, daemon=True),
             threading.Thread(target=self._forward, daemon=True),
         ]
         for thread in self.threads:
             thread.start()
-
-    def _open_audio(self):
-        try:
-            self.audio_fd = open(self.audio_path, "wb")
-        except OSError as error:
-            log(f"audio fifo failed to open: {error}")
 
     def _feed_video(self):
         while running and self.proc.poll() is None:
@@ -205,32 +243,6 @@ class Encoder:
             try:
                 self.proc.stdin.write(payload)
                 self.proc.stdin.flush()
-            except (BrokenPipeError, ValueError, OSError):
-                return
-
-    def _feed_audio(self):
-        """Drains the whole queue per write.
-
-        The emulator emits ~690 audio packets a second, each a fraction of a millisecond of sound.
-        Writing and flushing each one separately is ~1400 syscalls a second, which this cannot keep
-        up with — the queue then overflows and the discarded packets are heard as crackling. They
-        are contiguous samples, so joining them costs nothing and changes nothing.
-        """
-        while running and self.proc.poll() is None:
-            try:
-                chunks = [self.audio_q.get(timeout=0.5)]
-            except queue.Empty:
-                continue
-            while True:
-                try:
-                    chunks.append(self.audio_q.get_nowait())
-                except queue.Empty:
-                    break
-            if self.audio_fd is None:
-                continue
-            try:
-                self.audio_fd.write(b"".join(chunks))
-                self.audio_fd.flush()
             except (BrokenPipeError, ValueError, OSError):
                 return
 
@@ -257,12 +269,6 @@ class Encoder:
         except queue.Full:
             self.dropped_video += 1
 
-    def push_audio(self, payload):
-        try:
-            self.audio_q.put_nowait(payload)
-        except queue.Full:
-            self.dropped_audio += 1
-
     def alive(self):
         return self.proc.poll() is None
 
@@ -277,8 +283,7 @@ class Encoder:
         self.active = False
 
         def teardown():
-            for closer in (lambda: self.proc.stdin.close(),
-                           lambda: self.audio_fd and self.audio_fd.close()):
+            for closer in (lambda: self.proc.stdin.close(),):
                 try:
                     closer()
                 except Exception:
@@ -288,8 +293,6 @@ class Encoder:
                 self.proc.wait(timeout=3)
             except Exception:
                 self.proc.kill()
-            if os.path.exists(self.audio_path):
-                os.unlink(self.audio_path)
 
         threading.Thread(target=teardown, daemon=True).start()
 
@@ -380,6 +383,7 @@ def main():
     parser.add_argument("--bind", default="0.0.0.0", help="LAN address to serve the stream on")
     parser.add_argument("--port", type=int, default=6690)
     parser.add_argument("--input-port", type=int, default=6691)
+    parser.add_argument("--audio-port", type=int, default=6692)
     parser.add_argument("--control-port", type=int, default=6681, help="instB's loopback HTTP surface")
     parser.add_argument("--pad-handler", default="padstate", help="Lua handler applying the pad state")
     parser.add_argument("--vcodec", default="libx264")
@@ -405,8 +409,10 @@ def main():
     signal.signal(signal.SIGTERM, stop)
 
     client = Client()
+    audio = AudioServer(args)
     bridge = PadBridge(args.control_port, args.pad_handler)
     threading.Thread(target=serve_video, args=(args, client), daemon=True).start()
+    threading.Thread(target=audio.serve, daemon=True).start()
     threading.Thread(target=serve_input, args=(args, bridge), daemon=True).start()
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -471,8 +477,7 @@ def main():
                 encoder.push_video(payload)
             frames += 1
         elif ptype == AUDIO:
-            if encoder:
-                encoder.push_audio(payload)
+            audio.send(payload)
             audio_packets += 1
 
         now = time.monotonic()
@@ -483,9 +488,9 @@ def main():
                 f"p99 {ages[int(len(ages)*0.99)]/1000:.1f}ms max {ages[-1]/1000:.1f}ms")
             age_samples = []
             log(f"in {frames / elapsed:.1f} fps, {audio_packets / elapsed:.0f} audio pkt/s | "
-                f"joiner={'yes' if client.connected() else 'no'} conns={client.connections} | "
-                f"encoder drops v={encoder.dropped_video if encoder else 0} "
-                f"a={encoder.dropped_audio if encoder else 0} | "
+                f"joiner={'yes' if client.connected() else 'no'} conns={client.connections} "
+                f"audio-conns={audio.connections} | "
+                f"encoder drops v={encoder.dropped_video if encoder else 0} | "
                 f"pad applied={bridge.applied} failed={bridge.failures}")
             frames = audio_packets = 0
             last_stats = now
