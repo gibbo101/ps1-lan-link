@@ -124,8 +124,17 @@ class Encoder:
     """
 
     generation = 0
+    # When the first encoder started. Every later one offsets its output timestamps by how long ago
+    # that was, so a rebuild continues the timeline instead of restarting it at zero. The joiner
+    # holds one TCP connection across rebuilds, and a decoder shown time running backwards drops
+    # everything it has and flashes.
+    epoch = None
 
     def __init__(self, width, height, fmt, args, client):
+        if Encoder.epoch is None:
+            Encoder.epoch = time.monotonic()
+        self.ts_offset = time.monotonic() - Encoder.epoch
+
         self.width, self.height, self.fmt = width, height, fmt
         self.client = client
         self.active = True
@@ -144,15 +153,22 @@ class Encoder:
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             "-fflags", "nobuffer", "-flags", "low_delay",
             "-thread_queue_size", "64",
+            # Timestamps come from the wall clock, not from counting frames. The emulator runs at
+            # ~60.1 fps, so a fixed 60 fps timeline drifts slower than real time and the player
+            # falls further behind every second — latency that grows instead of settling.
             "-f", "rawvideo", "-pix_fmt", PIX_FMT[fmt], "-s", f"{width}x{height}",
-            "-r", str(args.fps), "-i", "pipe:0",
+            "-r", str(args.fps), "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
+            # Video gets wall-clock timestamps, audio does not: audio arrives in bursts, so stamping
+            # it by arrival time produces a jittery clock, and a player syncing to that clock chases
+            # it instead of showing frames.
             "-thread_queue_size", "512",
             "-f", "s16le", "-ar", str(args.audio_rate), "-ac", "2", "-i", self.audio_path,
             "-vf", f"scale={args.out_width}:{args.out_height}:flags=bilinear",
             "-c:v", args.vcodec, "-preset", "ultrafast", "-tune", "zerolatency",
             "-b:v", args.bitrate, "-g", str(args.fps), "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k",
-            "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1",
+            "-output_ts_offset", f"{self.ts_offset:.3f}",
+            "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1", "pipe:1",
         ]
         log(f"encoder up: {width}x{height} {PIX_FMT[fmt]} -> {args.out_width}x{args.out_height} {args.vcodec}")
         self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -398,6 +414,7 @@ def main():
 
     encoder = None
     frames = audio_packets = 0
+    age_samples = []
     last_stats = time.monotonic()
 
     while running:
@@ -414,6 +431,12 @@ def main():
             break
 
         if ptype == VIDEO:
+            # The emulator stamps frames from steady_clock and this runs on the same machine, so
+            # the two clocks are the same CLOCK_MONOTONIC and the difference is real: how old a
+            # frame already is before any encoding happens. It bounds how much of the lag can
+            # possibly be upstream of ffmpeg.
+            age_us = int(time.monotonic() * 1_000_000) - timestamp
+            age_samples.append(age_us)
             # No joiner, no encoder. Encoding for nobody would spend a Deck's headroom on frames
             # that go straight in the bin, and this host is already running two emulators.
             if encoder and not client.connected():
@@ -441,6 +464,10 @@ def main():
         now = time.monotonic()
         if now - last_stats >= args.stats_interval:
             elapsed = now - last_stats
+            ages = sorted(age_samples) or [0]
+            log(f"frame age at host: median {ages[len(ages)//2]/1000:.1f}ms "
+                f"p99 {ages[int(len(ages)*0.99)]/1000:.1f}ms max {ages[-1]/1000:.1f}ms")
+            age_samples = []
             log(f"in {frames / elapsed:.1f} fps, {audio_packets / elapsed:.0f} audio pkt/s | "
                 f"joiner={'yes' if client.connected() else 'no'} conns={client.connections} | "
                 f"encoder drops v={encoder.dropped_video if encoder else 0} "

@@ -49,12 +49,24 @@ else
   echo "[join] WARNING: no /dev/input/js* — you will see the game but cannot play it"
 fi
 
-# -fflags nobuffer and a zero-sized queue trade smoothness for latency, which is the right trade for
-# something being played rather than watched. -sync ext keeps audio and video tied to the stream
-# clock rather than letting video chase audio.
+# Everything here trades smoothness for latency, which is the right trade for something being
+# played rather than watched.
+#
+# There is deliberately no -infbuf: an unbounded input buffer never drops anything, so when the
+# network hiccups the backlog is kept and played late, and the lag it introduces never comes back
+# out. -framedrop lets late frames go instead, which is what keeps the controller feeling attached
+# to the picture. Probing is cut to the minimum because a live stream has nothing to learn from
+# buffering a second of it first.
+# Deliberately empty by default. Cutting the probe size to almost nothing and forcing unbuffered
+# reads leaves the decoder too little to identify the stream with, and the picture tears and
+# flashes rather than arriving sooner. Override for experiments; do not add these back on a hunch.
+LATENCY_ARGS="${LATENCY_ARGS:-}"
+
 echo "[join] playing tcp://$HOST:$PORT"
+# shellcheck disable=SC2086
 ffplay -hide_banner -loglevel warning \
-  -fflags nobuffer -flags low_delay -framedrop -infbuf \
+  -fflags nobuffer -flags low_delay -framedrop \
+  $LATENCY_ARGS \
   -sync ext -autoexit -fs \
   -window_title "PS1 LAN Link" \
   "tcp://$HOST:$PORT"
