@@ -76,17 +76,19 @@ echo "[join] playing tcp://$HOST:$PORT"
 # pass, decodes all of it and draws only the newest frame, so it sits about two frames behind the
 # host and cannot accumulate. ffplay is kept as the fallback for a Deck that has not had the player
 # deployed yet - set PLAYER=ffplay to force it.
+# Not exec: this shell owns the pad forwarder and the audio pipeline, and replacing it would leave
+# both running after the player quits.
 PLAYER="${PLAYER:-auto}"
 if [ "$PLAYER" != "ffplay" ] && [ -x "$HERE/ps1-join-player" ]; then
   echo "[join] using the bespoke player"
-  exec "$HERE/ps1-join-player" "tcp://$HOST:$PORT"
+  "$HERE/ps1-join-player" "tcp://$HOST:$PORT"
+else
+  echo "[join] using ffplay"
+  # -framerate matters more than it looks. A bare H.264 stream carries no timing at all, so the
+  # demuxer falls back to 25 fps: frames arrive at 60 a second and are paced out at 25, the backlog
+  # grows for as long as the session lasts, and every button press waits behind it.
+  ffplay -hide_banner -loglevel warning \
+    -f h264 -framerate "$FPS" -flags low_delay -fflags nobuffer -framedrop \
+    -autoexit -fs -window_title "PS1 LAN Link" \
+    "tcp://$HOST:$PORT"
 fi
-
-echo "[join] using ffplay"
-# -framerate matters more than it looks. A bare H.264 stream carries no timing at all, so the
-# demuxer falls back to 25 fps: frames arrive at 60 a second and are paced out at 25, the backlog
-# grows for as long as the session lasts, and every button press waits behind it.
-ffplay -hide_banner -loglevel warning \
-  -f h264 -framerate "$FPS" -flags low_delay -fflags nobuffer -framedrop \
-  -autoexit -fs -window_title "PS1 LAN Link" \
-  "tcp://$HOST:$PORT"
