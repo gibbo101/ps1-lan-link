@@ -26,3 +26,6 @@ __pycache__/
 # Raw emulator logs run to tens of MB. The SPEED extracts in docs/session7-evidence are the evidence.
 docs/session7-evidence/*-run.log
 *.stale
+
+# Built by deploy/deck/stream/player/build.sh from the .c beside it.
+/deploy/deck/stream/player/ps1-join-player

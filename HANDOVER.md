@@ -96,26 +96,35 @@ Do not re-investigate these; each was measured, not assumed:
 | delivered frame rate | 60.0 fps over wifi | not it |
 | wifi | 0% loss, 12.8–48.8 ms RTT | contributes ~11–25 ms one way |
 
-### Input lag — measured on Deck 2, and it is ffplay (session 11)
+### Input lag — what session 11 established, and one claim it had to withdraw
 
-**ffplay holds 116–166 ms of video, on loopback, with no network in the path.** That is the input
-lag. It was measured on the joining Deck itself, which had never been instrumented before.
+⚠️ **Correction to an earlier commit in this session** (`6ff340e`, "Measure the joiner's latency on
+the Deck that suffers it"). That commit claims **"ffplay holds 116–166 ms on loopback … that is the
+input lag."** **It does not establish that, and the figure should not be quoted.** The instrument
+times the gap between cutting the stream and the player's *process exiting*, which includes tearing
+down an SDL window as well as playing out a buffer, and it cannot separate the two:
 
-**The instrument — `drain-test.py`.** A live stream's latency is simply whatever the player has
-buffered, so: pace a pre-encoded h264 stream into the player at exactly 60 fps over TCP, cut the
-connection, and time how long the player keeps going before it runs dry. No screen capture, no
-camera, no clock shared with anything. Controls first, because the harness has to be proved before
-its numbers mean anything:
-
-| Player | Held when the stream was cut |
+| Frames sent before the cut | ffplay held |
 |---|---|
-| raw socket sink (reads and discards) | **8 ms** — this is the harness's own overhead |
-| `ffplay -nodisp` (demux + decode, no presentation) | **64 ms** |
-| **`ffplay` as shipped** | **116–166 ms** |
+| 1–2 (no window ever shown) | 64 ms |
+| 3, 5, 10 | 164 ms |
+| 60 | 114 ms |
+| 600 | 116 ms |
 
-**No flag moves it.** Every variant lands in the same band, and the two values it takes are 50 ms
-apart, which is the picture queue's three frames — the differences between configurations are
-inside the noise:
+The ~100 ms step between "no window" and "window" is *either* the picture queue *or* window
+teardown, and nothing here decides which. The absolute latency of ffplay is **still unmeasured**.
+
+**What the drain test does prove.** Teardown is a constant, so anything measured as a *difference*
+between configurations of the same player remains valid:
+
+- **The harness costs nothing.** A raw socket sink that reads and discards drains in **8 ms**.
+- **It does not accumulate.** Cut after 5 s, 10 s and 19 s — the figure is identical. The theory
+  that a bare h264 stream with a synthesised 60 fps timeline drifts unboundedly against a live
+  source is **wrong**; the buffer is a fixed depth.
+- **It is not frame-threading.** 116–166 ms is close to seven frames, which on an eight-core Deck
+  made libavcodec's `threads - 1` output delay look like the whole answer. `-threads 1` changes
+  nothing.
+- **No flag moves it**, which is the one thing the drain test was really good for:
 
 | Variant | Held |
 |---|---|
@@ -126,23 +135,55 @@ inside the noise:
 | `-sync ext` | 166 ms |
 | `-threads 1` / `2` / `4` / `auto` | 166 ms in all four |
 
-So **"that family is exhausted" is now a measurement rather than an opinion**, and the remaining
-step is the purpose-built player the tester already approved bundling ("if moonlight / sunshine are
-packaged in there and are custom bespoke versions for our use case only im ok with that").
-
-**Two hypotheses killed by this rig — do not spend time on either:**
-
-- **It does not accumulate.** Cut after 5 s, 10 s and 19 s and the figure is the same. The theory
-  that a bare h264 stream with a synthesised 60 fps timeline drifts unboundedly against a live
-  source is wrong; the buffer is a fixed depth, not a growing one.
-- **It is not frame-threading.** 116–166 ms is close enough to seven frames that libavcodec's
-  `threads - 1` output delay looked like the whole answer on an 8-core Deck. Forcing `-threads 1`
-  changes nothing.
+So **"that family is exhausted" is now a measurement rather than an opinion.**
 
 **Hardware decode is not the win either.** Deck 2 decodes 1200 frames of 512x240 h264 in 0.38 s in
 software and 0.44 s through VAAPI — about 3000 fps either way. At this resolution decode is free,
 and the "no software H.264 decoder on that Deck" note in `f57dc90` refers to its *GStreamer*, not to
 ffmpeg. Deck 2 does have `vaapi` and a world-writable `/dev/dri/renderD128`.
+
+### How to measure this properly — and the wall in the way
+
+**Screen capture on a Deck is black.** `x11grab` on Deck 2's gamescope displays returns a 286-byte
+PNG (pure black) on **both** `:0` and `:1` while a player is visibly running. This confirms the
+session-7 finding from the other direction, and it means **no flash-to-photon measurement is
+possible on a Deck without a camera.** The desktop PC is no substitute: its X server refuses GLX to
+a non-session process (`X_GLXCreateContext` BadValue), so ffplay cannot open a window there either.
+
+**The instrument that avoids both traps** is `tools/inflight-probe.py`: frames in flight = frames
+sent − how far through the stream the player has got. No teardown, no capture. ffplay reports its
+position in its own stats line (`   0.03 M-V: … vq=  24KB`, carriage-return separated, so it must be
+read by character and not by line); a bespoke player can print a counter.
+
+**It is not finished.** It reads the bespoke player fine but returns **zero samples for ffplay**,
+unexplained — ffplay demonstrably writes those stats to stderr when run by hand. Fix that before
+trusting any comparison, and note the metric must count frames the player has *consumed*, not frames
+it has *drawn*: a player whose whole purpose is skipping stale frames would otherwise report its own
+design as latency.
+
+### The bespoke player — two designs tried, both fail, do not ship either
+
+`deploy/deck/stream/player/`. **The build problem is solved and worth keeping**; the player is not.
+
+**Solved: cross-building for SteamOS.** A Deck has no compiler, and a current Arch container links
+against ffmpeg 7.2 (`libavcodec.so.62`) while SteamOS 3.7.24 has 7.1 (`.61`) — such a binary will
+not start on a Deck. `build.sh` pulls ffmpeg 7.1.1 from the Arch archive and links against that, so
+the result needs exactly `libavcodec.so.61`, `libavutil.so.59`, `libSDL2-2.0.so.0`, all of which the
+Deck already ships. Two traps: `tar` needs `--force-local` because the epoch's colon in
+`ffmpeg-2:7.1.1` reads as a remote host, and `-Wl,--allow-shlib-undefined` is required because the
+archive package's own dependencies are not present in the container.
+
+**Design A — ffmpeg decodes, a small SDL binary presents.** Attractive because it links only SDL2.
+It fails structurally: the backlog collects in *ffmpeg's* socket buffer, where nothing downstream
+can skip it, so a one-second startup delay stayed one second behind for the whole session —
+**59 frames in flight, flat**. A player must own its socket to be able to drop.
+
+**Design B — the player owns the socket and decodes with libavcodec.** Drains the socket every pass,
+decodes everything, draws only the newest frame. It **consumes at roughly half the source rate** and
+the backlog grows without bound — 137 → 741 frames over 20 s. Ruled out as causes: vsync (tested
+off), fullscreen (tested windowed). **Unexplained, and this is where the next session should start.**
+Suspect the read/drain loop in `ps1-join-player.c` before suspecting decode, which is free at this
+resolution.
 
 **Tried and reverted — do not repeat without measuring latency first:**
 
