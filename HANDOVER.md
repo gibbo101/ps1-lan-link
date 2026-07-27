@@ -1,8 +1,8 @@
 # HANDOVER — pick up here
 
-Session 7 (2026-07-25) ran the two-Deck cable test and **closed that frontier — symmetry does not
-help.** Read the session-7 section first. Session 6 remains the reference for the *root cause* of the
-menu slowness, and the loopback story (session 4) for *how the link works*.
+Session 12 (2026-07-27) is the section to read first — the ack fix, the input-lag eliminations,
+and a new instA deadlock that blocks Deck play-testing. Session 6 remains the reference for the
+*root cause* of the link stalling, and the loopback story (session 4) for *how the link works*.
 `docs/FINDINGS.md` holds the full evidence trail. Logs/screenshots: `docs/session7-evidence/`,
 `docs/session5-evidence/`.
 
@@ -10,7 +10,88 @@ menu slowness, and the loopback story (session 4) for *how the link works*.
 
 ---
 
-## 🔴 START HERE — session 10c. The joiner works but does not feel good, and why
+## 🔴 START HERE — session 12. The ack works, the lag does not move, and instA deadlocked
+
+**State at close, 2026-07-27 evening.** Three separate threads this session; read them in this
+order because the third blocks play-testing the first.
+
+### 1. The stall asymmetry: windowed local ack validated on desktop, live on Deck 1, unproven in Deck play
+
+`PCSX_LINK_LOCAL_ACK=1` (window 8, block 4 — the session-6 knobs, never before enabled in play) was
+A/B tested in **real, human-driven matches on desktop loopback**, same binary as the Decks
+(`b73661eb…`). Automated menu navigation proved too flaky to reach a match reliably
+(`repro/match-ab-test.py` twice pressed X into the wrong screen state); the working method was the tester
+driving and `repro/speed-sample.py` reading the logs. Commit `78eb7f5`.
+
+Measured on the slow side over ~2 min of play, median (n=60):
+
+| | baseline | local ack |
+|---|---|---|
+| SPEED | 95.8% (min 93.1) | **97.9% (min 95.7)** |
+| stall share | 87.2% | 86.2% |
+| receive FIFO peak | 4 | **56, flat** |
+
+The share stays high but each stall now resolves in a loopback RTT instead of a peer frame; the
+FIFO depth is the mechanism visible (the peer genuinely running ahead, bounded by the window).
+**Match start survived** — the historical killer of every ack experiment — and the tester confirmed both
+sides show the same world and the selector pulsing is consistent. Session-6's "maxfifo 55 = the
+desync coming" does **not** generalise: in-game the protocol tolerates a deep FIFO fine.
+
+**Two corrections to the record:**
+
+- **The slow side follows match authority, not socket role.** On the Deck the client (instB) was
+  slow; on the desktop the server (instA) was. "Blue team" is the tell for which side is paying.
+  Do not assume instB is the victim when measuring.
+- The desktop could only ever show +2% because it idles near 100%; the Deck's streamed side at
+  87%/52 fps is the real target and is **still unmeasured with the ack on** — the play test died on
+  threads 2 and 3 below.
+
+Deployed: launcher exports `LINK_LOCAL_ACK` / `LINK_ACK_WINDOW` / `LINK_ACK_BLOCK` from
+`gamemode.conf` to both instances; Deck 1's conf carries `LINK_LOCAL_ACK=1`. Backout = delete that
+line. Both instances get the same setting — an asymmetric pair is untested.
+
+### 2. Joiner input lag: two environmental suspects cleared, the player remains
+
+- **Deck 2's join died with "No route to host":** `join.conf` pins Deck 1's DHCP address and it had
+  moved (.164 → .104). Fixed by editing the conf on Deck 2. This will happen again — a DHCP
+  reservation for Deck 1 or the stage-3 discovery is the real fix.
+- **Both Decks ran wifi power save ON.** Idle Deck↔Deck RTT was 122–447 ms with it on, 3–15 ms
+  off. Turned off on both (`sudo iw dev wlan0 set power_save off`, commands kept in
+  `~/Desktop/deck-wifi-powersave.md`; **resets on reboot**). The tester then re-tested and reports the
+  menu input lag **unchanged** — the streaming traffic was evidently keeping the radio awake
+  already, so power save is ruled out for the *felt* lag. Two consequences worth keeping: the
+  historical "wifi contributes 12–25 ms" figures were measured through a dozing radio and are
+  suspect, and idle-link pings are not evidence about in-stream latency (measure the failing case).
+
+With the radio cleared, everything measured innocent now leaves **ffplay's internal queue** as the
+only unmeasured stage — where session 11 already pointed. The next move is unchanged and half done:
+**verify the fixed bespoke player against a real captured stream.** The local build
+(`deploy/deck/stream/player/ps1-join-player`, Jul 26 14:22, 27 KB) contains the both-start-codes
+fix; **Deck 2 still holds the stale pre-fix binary** (`ps1-join-player.disabled`, 13:29, 23 KB) —
+redeploy, don't just re-enable. Capture a stream per the session-11 instructions (emulator with
+`-stream-socket` + `stream-host.py` on the PC, save the TCP output), check the decoded/displayed
+ratio, then swap it in on Deck 2 (`PLAYER=ffplay` line out, binary renamed back).
+
+### 3. NEW: instA deadlocks on Deck 1 — blocks everything, cause unknown
+
+During the (never-completed) two-Deck test, Deck 1 went unresponsive at the **menus**: instA's
+SPEED lines simply stop mid-flight after ~50 s of healthy 100%/60 fps, no error, no livelock
+signature, `tx=0` the whole run, `acks=0` (the ack path never fired — this is *probably* not the
+ack change, but the build+conf is the first thing that changed since yesterday's clean session).
+The process stays alive but its web surface times out and **every thread sleeps at 0% CPU**
+(`futex_do_wait` across the board, uv thread in epoll, one in poll) — a real deadlock, not a spin.
+instB, identical build in the same launch, ran on at 100% unaffected. Evidence: this section is
+written from the live probe; the hung pair was then killed (`pkill -9 -x AppRun` — remember trap:
+`pkill -f` matches the SSH command carrying it).
+
+Next session: reproduce first (couch/Game-Mode launch, sit at menus pressing around), then get a
+thread backtrace — `eu-stack -p <pid>` if elfutils exists on SteamOS, else gdb from a distrobox, or
+reproduce on the desktop where tooling is easy. If it does not reproduce with `LINK_LOCAL_ACK`
+unset, the ack change is implicated after all; that A/B is one conf line.
+
+---
+
+## Session 10c. The joiner works but does not feel good, and why
 
 **Read this section before touching anything.** A joiner exists, a two-Deck match has been played
 through it, and the host side is untouched and fine. The joining side has three complaints from
