@@ -266,10 +266,14 @@ stream."** That pointed at the pipeline. **It was the wrong conclusion, and the 
 | wall in the SIO1 stall | 39.3% | **83.6%** |
 | uv loop runs per 2 s | 2.27 M | **5.07 M** |
 
-**The link's two sides are asymmetric, and the client pays double.** The tester saw this directly: the
-selector on the streamed side pulses visibly slower than on the host's, because the blue side's
-*emulated time* really is running 12% slow. It is not a display artefact and no player work touches
-it — **both players are playing a 52 fps game.**
+**The link's two sides are asymmetric, and the client pays double.** The two instances are separate
+emulations exchanging serial data, **not frame-locked**, so they run at different speeds and each
+player sees their own instance's speed: **Deck 1 is genuinely at full speed and Deck 2 is genuinely
+slow.** The tester saw exactly this — the selector over the MCV pulses visibly slower on the streamed side
+— and confirmed it against a claim that both sides must share the slower rate, which is wrong.
+
+The blue side's *emulated time* really is running 12% slow. It is not a display artefact, and no
+player work touches it.
 
 **Proof it is not the stream, from instB's own log earlier in the same session:**
 
