@@ -26,6 +26,13 @@ case "${1:-}" in
   shot)
     id="$2"; out="$3"
     eval "$(xdotool getwindowgeometry --shell "$id")"
+    # x11grab refuses any capture area extending past the screen, and a window manager is free to
+    # place a window partly off it; capture the on-screen part.
+    read -r SW SH < <(xdpyinfo | awk '/dimensions:/ {split($2, d, "x"); print d[1], d[2]}')
+    [ "$X" -lt 0 ] && { WIDTH=$((WIDTH + X)); X=0; }
+    [ "$Y" -lt 0 ] && { HEIGHT=$((HEIGHT + Y)); Y=0; }
+    [ $((X + WIDTH)) -gt "$SW" ] && WIDTH=$((SW - X))
+    [ $((Y + HEIGHT)) -gt "$SH" ] && HEIGHT=$((SH - Y))
     ffmpeg -v error -f x11grab -video_size "${WIDTH}x${HEIGHT}" -i "$DISP+$X,$Y" -frames:v 1 "$out" -y
     ;;
   key)

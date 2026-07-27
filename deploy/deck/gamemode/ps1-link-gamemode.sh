@@ -65,6 +65,16 @@ FULLSCREEN="${FULLSCREEN:-1}"
 CTL="${CTL_ENV:-${CTL:-1}}"   # set 0 to leave the HTTP control surface off
 STREAM="${STREAM:-1}"         # set 0 for couch play — no joiner, so nothing to encode for
 
+# The link's two sides are asymmetric: the client spends most of its wall clock stalled waiting
+# for acknowledgements the host's emulated driver only produces by advancing emulated time. The
+# transport-level ack in the emulator answers the moment a block lands instead, bounded by
+# LINK_ACK_WINDOW so the peer can never run further ahead than the hardware FIFO could absorb.
+# Opt-in from gamemode.conf (LINK_LOCAL_ACK=1); unset leaves the emulator's defaults (off).
+# Exported here so both instances see the same setting — an asymmetric pair is untested.
+[ -n "${LINK_LOCAL_ACK:-}" ] && export PCSX_LINK_LOCAL_ACK="$LINK_LOCAL_ACK"
+[ -n "${LINK_ACK_WINDOW:-}" ] && export PCSX_LINK_ACK_WINDOW="$LINK_ACK_WINDOW"
+[ -n "${LINK_ACK_BLOCK:-}" ] && export PCSX_LINK_ACK_BLOCK="$LINK_ACK_BLOCK"
+
 # Errors go to stderr, not stdout: resolve_game runs inside a command substitution, and a message on
 # stdout there is captured into the variable instead of reaching the player.
 die() { echo "[gm] ERROR: $*" >&2; exit 1; }
