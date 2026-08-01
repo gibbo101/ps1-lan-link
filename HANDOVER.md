@@ -7,7 +7,36 @@ the link stalling, and the loopback story (session 4) for *how the link works*. 
 holds the full evidence trail. Logs/screenshots: `docs/session7-evidence/`,
 `docs/session5-evidence/`.
 
-**Goal:** C&C Red Alert Retaliation link-cable play over LAN between two Steam Decks.
+**Goal:** C&C Red Alert Retaliation link-cable play over LAN between two Steam Decks — now grown
+into: one unified app with Host/Join over LAN and game select.
+
+---
+
+## Session 13b (2026-08-01, same day): the unified app exists and is deployed
+
+**One Steam entry, "PS1 LAN Link", on both Decks** (`6a76879`): an SDL2 menu (gamepad + keyboard)
+offers Host a game / Join a game. Host lists the catalogue (`games.conf`: Retaliation ok, Dune
+2000 ok, Doom shown-but-dead — its boot serial handshake is unsatisfied, `redalert-allies` hidden
+as a mislabelled Retaliation rip; unlisted cues appear under their file names). Join lists hosts
+discovered live: `stream-host.py --beacon-game` broadcasts one UDP JSON datagram/second on 6693,
+the join screen lists what it hears, entries expire after 4 s. **join.conf's pinned IP is no
+longer load-bearing** (still honoured as fallback via the old Join shortcut). No sudo anywhere.
+
+Pieces: `deploy/deck/menu/ps1-link-menu.c` (+ `build.sh`, cross-builds in a container, links only
+SDL2/SDL2_ttf), `deploy/deck/ps1-link-unified.sh` (installed as `ps1-link.sh` — payload from the
+menu → existing gamemode/join scripts, menu returns when a session ends), beacon in
+`stream-host.py`, catalogue `deploy/deck/games.conf`. Both installers deploy the lot; gamemode
+launcher passes `GAME_LABEL` into the beacon.
+
+**Verified without touching a controller**: `MENU_AUTOPILOT`/`MENU_AUTOPILOT_FILE` feed scripted
+input (the FILE form consumes tokens across menu relaunches — the env form loops forever in the
+launcher's while-loop, found the hard way); full host/join flows ran against stub session scripts
+in a container; both Decks ran menu+launcher headless (`SDL_VIDEODRIVER=dummy`) over SSH; and
+**Deck 2's join screen discovered Deck 1's beacon over the real wifi** and returned
+`JOIN 192.168.0.104`. NOT yet verified: the visible fullscreen menu in Game Mode with a real
+controller — that is the tester's first launch. Traps encountered: `pkill -f` over SSH killed its own
+session AGAIN (use `pkill -x`); a `-stream-socket` path over ~107 bytes is silently rejected
+(the emulator logs "socket path too long").
 
 ---
 
