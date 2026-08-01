@@ -270,14 +270,19 @@ class Encoder:
                 return
 
     def _forward(self):
-        """Encoded bytes to the joiner. Reads ffmpeg even with nobody attached, or it would block.
+        """Encoded bytes to the joiner, forwarded the moment ffmpeg produces them.
 
-        Stops sending the moment this encoder is superseded. A replaced encoder keeps draining for
-        a little while as it shuts down, and two muxers interleaving into one socket produce a
-        stream that decodes to nothing.
+        Reads the raw pipe, never a buffered wrapper: a buffered read(n) waits for n bytes, and at
+        a static menu's bitrate 16 KB is *seconds* of encoded output — all of it sitting here as
+        input lag while the joiner watches a stale frame. os.read returns whatever the pipe holds.
+
+        Reads ffmpeg even with nobody attached, or it would block. Stops sending the moment this
+        encoder is superseded. A replaced encoder keeps draining for a little while as it shuts
+        down, and two muxers interleaving into one socket produce a stream that decodes to nothing.
         """
+        fd = self.proc.stdout.fileno()
         while running and self.proc.poll() is None:
-            chunk = self.proc.stdout.read(16384)
+            chunk = os.read(fd, 65536)
             if not chunk:
                 return
             if self.active:

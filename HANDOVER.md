@@ -1,12 +1,91 @@
 # HANDOVER — pick up here
 
-Session 12 (2026-07-27) is the section to read first — the ack fix, the input-lag eliminations,
-and a new instA deadlock that blocks Deck play-testing. Session 6 remains the reference for the
-*root cause* of the link stalling, and the loopback story (session 4) for *how the link works*.
-`docs/FINDINGS.md` holds the full evidence trail. Logs/screenshots: `docs/session7-evidence/`,
+Session 13 (2026-08-01) is the section to read first — the joiner input lag is root-caused and
+fixed at the host, and the session-12 start-code diagnosis is withdrawn. Session 12 covers the ack
+fix and the instA deadlock (still open). Session 6 remains the reference for the *root cause* of
+the link stalling, and the loopback story (session 4) for *how the link works*. `docs/FINDINGS.md`
+holds the full evidence trail. Logs/screenshots: `docs/session7-evidence/`,
 `docs/session5-evidence/`.
 
 **Goal:** C&C Red Alert Retaliation link-cable play over LAN between two Steam Decks.
+
+---
+
+## 🔴 START HERE — session 13. The joiner input lag was the host batching encoded bytes
+
+**The lag was never in the player, the wifi, or the emulator. It was one line in `stream-host.py`.**
+`Encoder._forward` read ffmpeg's stdout with `proc.stdout.read(16384)` — a *buffered* read that
+blocks until the full 16 KB accumulates. Encoded frames sat in that buffer until enough of them
+piled up to fill it. At FMV bitrates that is ~4 frames (~67 ms); at a static menu's bitrate
+(~4 KB/s measured) it is **seconds** — the joiner's picture updated only when a 16 KB lump finally
+shipped. Menus are exactly where the tester felt the lag, the host (who never sees the stream) was
+flawless, and every earlier measurement passed because frame *age* was measured upstream of ffmpeg
+and delivered *fps* is an average that bursts preserve.
+
+The fix is `os.read` on the raw pipe fd — forward whatever ffmpeg has produced, immediately.
+
+**Measured, desktop loopback, 120 s boot+FMV+menus captures** (`tools/stream-capture.py` records
+the stream with per-chunk arrival times; `tools/stream-replay.py` replays it identically):
+
+| inter-chunk gap | before | after |
+|---|---|---|
+| p50 | 66.8 ms | **16.6 ms** (exactly one frame) |
+| p99 | 1000 ms | **21.5 ms** |
+| max | 4866 ms | **54 ms** |
+| chunks/120 s | 1114 | 7219 (one per frame) |
+
+Same capture on **Deck 1 over real wifi** through the fixed host: 8466 chunks / 7205 frames,
+p50 15.9 ms, p99 28.3 ms, max 154 ms. Per-frame delivery end to end, menus included.
+
+**Deployed:** fixed `stream-host.py` on Deck 1 (md5 `376bb7aa…`), 2026-08-01. Deck 2's joiner
+needs nothing for this fix — the batching was entirely host-side.
+
+### The bespoke player is verified — and the session-12 start-code diagnosis was a phantom
+
+The fixed player (both-start-code splitter, binary `3749027e…`, byte-identical rebuild from
+current source) was verified against **real captured streams from both encoders** (desktop x264
+and Deck 1's ffmpeg 7.1 x264), replayed with live chunking:
+
+- real-time per-frame pacing: **7213 decoded, 7199 shown, 14 stale** — every frame, 60 fps, no
+  backlog. `[h264] no frame!` twice per keyframe is cosmetic (the splitter hands SPS and PPS to
+  the decoder as separate packets); no pictures are lost.
+- Deck-1 bytes: 7204/7205 decoded.
+
+**Withdrawn:** session 12's claim that the pre-fix player judddered because "x264 emits three-byte
+start codes and access units were merged." Start-code scans of both real captures show every AU
+*start* is reachable by a four-byte-only scanner (P-pictures open with a 4-byte first slice;
+IDR AUs open at a 4-byte SPS — only *subsequent* slices are 3-byte). The pre-fix player decodes
+both captures byte-for-byte identically to the fixed one. The "displayed 1 in 11" judder was the
+host batching: ~9.5 lumps/s against 60 fps decode is exactly that ratio. Sixth instance of
+diagnosing without measuring the failing case. The fixed player still ships — its splitter is
+correct and the SPS/PPS handling difference is harmless.
+
+### What is actually deployed / still to do
+
+- **Deck 1: done** — fixed `stream-host.py` in place; relaunch the host app to pick it up.
+- **Deck 2: pending** — the verified player binary + `stream-join.sh` need copying, the stale
+  `ps1-join-player.disabled` deleting, and `PLAYER=ffplay` dropping from `join.conf`.
+  `install-joiner.sh deck2 192.168.0.104` does all of it (join.conf is rewritten without
+  the PLAYER line; auto-select prefers the bespoke player), then
+  `ssh deck@deck2 rm -f /home/deck/ps1-lan-link/stream/ps1-join-player.disabled`.
+  Deck 1's DHCP address was still `.104` on 2026-08-01.
+- **Feel-test:** joiner menu responsiveness is the thing to test — it should now track the pad.
+  If it does, input lag is closed and the remaining joiner delta is ffplay-vs-bespoke polish.
+- **Untouched:** the SIO1 stall asymmetry (instB ~87% in-game) and the session-12 instA deadlock.
+  Two 2-minute single-instance headless runs on Deck 1 this session sat at menus without
+  deadlocking, but that is not the repro condition (no link, no Game Mode).
+
+### Capture/replay rig (new, keep)
+
+- `tools/stream-capture.py <host> <port> <out>` → `<out>.tchunks` (timestamped chunks) +
+  `<out>.h264`. Chunking is load-bearing evidence — do not capture with `nc`.
+- `tools/stream-replay.py <capture>.tchunks --port N [--speed X]` — serves one player with the
+  original pacing; `SENT` lines every 250 ms pair with the player's `SHOWN` lines for
+  frames-in-flight.
+- Captures live in `work/captures/` (gitignored): `retaliation-boot` (batched host, the failing
+  case), `retaliation-boot-fixed` (fixed host), `deck-boot` (Deck 1 encoder, fixed host, wifi).
+- Players run headless in the `ps1-player-verify` docker image (Arch + ffmpeg, `SDL_VIDEODRIVER=dummy`);
+  a `-stream-socket` path must be short — the emulator logs "socket path too long" past ~107 bytes.
 
 ---
 
