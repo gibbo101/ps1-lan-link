@@ -1195,6 +1195,779 @@ index b67f0458..6cd4edd4 100644
      for (ma_uint32 f = 0; f < frameCount; f++) {
          float l = 0.0f, r = 0.0f;
          for (unsigned i = 0; i < STREAMS; i++) {
+diff --git a/src/support/mediastream.cc b/src/support/mediastream.cc
+new file mode 100644
+index 00000000..a978d999
+--- /dev/null
++++ b/src/support/mediastream.cc
+@@ -0,0 +1,497 @@
++/*
++
++MIT License
++
++Copyright (c) 2026 PCSX-Redux authors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++*/
++
++#include "support/mediastream.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstring>
++
++#include "core/system.h"
++
++#if !defined(_WIN32) && !defined(_WIN64)
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++#endif
++
++PCSX::MediaStream &PCSX::MediaStream::get() {
++    static MediaStream s_stream;
++    return s_stream;
++}
++
++uint64_t PCSX::MediaStream::nowUs() const {
++    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
++        .count();
++}
++
++#if defined(_WIN32) || defined(_WIN64)
++
++void PCSX::MediaStream::start(const std::string &socketPath) {
++    g_system->printf("STREAM disabled: the media export needs unix domain sockets\n");
++}
++void PCSX::MediaStream::stop() {}
++void PCSX::MediaStream::run() {}
++bool PCSX::MediaStream::acceptClient(int) { return false; }
++void PCSX::MediaStream::dropClient(const char *) {}
++void PCSX::MediaStream::serialize(std::deque<VideoItem> &, std::deque<AudioItem> &) {}
++void PCSX::MediaStream::enqueueOut(std::vector<uint8_t> &&) {}
++bool PCSX::MediaStream::flushOut() { return false; }
++void PCSX::MediaStream::trimOut() {}
++void PCSX::MediaStream::pushVideo(Slice &&, uint16_t, uint16_t, VideoFormat) {}
++void PCSX::MediaStream::pushAudio(const AudioFrame *, size_t, uint32_t) {}
++void PCSX::MediaStream::tick() {}
++
++#else
++
++void PCSX::MediaStream::start(const std::string &socketPath) {
++    if (m_enabled.load()) return;
++    if (socketPath.empty()) return;
++
++    struct sockaddr_un addr;
++    if (socketPath.size() + 1 > sizeof(addr.sun_path)) {
++        g_system->printf("STREAM disabled: socket path too long: %s\n", socketPath.c_str());
++        return;
++    }
++
++    int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++    if (fd < 0) {
++        g_system->printf("STREAM disabled: socket() failed: %s\n", strerror(errno));
++        return;
++    }
++
++    // A path left behind by a previous run would make bind() fail with EADDRINUSE. Only remove it
++    // once nothing is listening on it, so two instances sharing a path cannot steal each other's
++    // consumer without saying so.
++    int probe = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++    if (probe >= 0) {
++        std::memset(&addr, 0, sizeof(addr));
++        addr.sun_family = AF_UNIX;
++        std::memcpy(addr.sun_path, socketPath.c_str(), socketPath.size());
++        bool live = ::connect(probe, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) == 0;
++        ::close(probe);
++        if (live) {
++            g_system->printf("STREAM disabled: %s is already served by another instance\n", socketPath.c_str());
++            ::close(fd);
++            return;
++        }
++        ::unlink(socketPath.c_str());
++    }
++
++    std::memset(&addr, 0, sizeof(addr));
++    addr.sun_family = AF_UNIX;
++    std::memcpy(addr.sun_path, socketPath.c_str(), socketPath.size());
++    if (::bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) != 0) {
++        g_system->printf("STREAM disabled: bind(%s) failed: %s\n", socketPath.c_str(), strerror(errno));
++        ::close(fd);
++        return;
++    }
++    if (::listen(fd, 1) != 0) {
++        g_system->printf("STREAM disabled: listen(%s) failed: %s\n", socketPath.c_str(), strerror(errno));
++        ::close(fd);
++        ::unlink(socketPath.c_str());
++        return;
++    }
++
++    m_socketPath = socketPath;
++    m_listenFd = fd;
++    m_quit.store(false);
++    m_enabled.store(true);
++    m_thread = std::thread([this]() { run(); });
++    g_system->printf("STREAM listening on %s\n", socketPath.c_str());
++}
++
++void PCSX::MediaStream::stop() {
++    if (!m_enabled.load()) return;
++    m_quit.store(true);
++    m_enabled.store(false);
++    m_wants.store(false);
++    m_cv.notify_all();
++    if (m_thread.joinable()) m_thread.join();
++    if (m_clientFd >= 0) {
++        ::close(m_clientFd);
++        m_clientFd = -1;
++    }
++    if (m_listenFd >= 0) {
++        ::close(m_listenFd);
++        m_listenFd = -1;
++    }
++    if (!m_socketPath.empty()) {
++        ::unlink(m_socketPath.c_str());
++        m_socketPath.clear();
++    }
++    std::lock_guard<std::mutex> l(m_mutex);
++    m_video.clear();
++    m_audio.clear();
++    m_audioFramesQueued = 0;
++    m_out.clear();
++    m_outBytes = 0;
++    m_outPackets = 0;
++    m_outOffset = 0;
++}
++
++void PCSX::MediaStream::run() {
++    while (!m_quit.load(std::memory_order_relaxed)) {
++        if (m_clientFd < 0) {
++            struct pollfd pfd = {m_listenFd, POLLIN, 0};
++            int r = ::poll(&pfd, 1, 100);
++            if (r > 0 && (pfd.revents & POLLIN)) acceptClient(m_listenFd);
++            continue;
++        }
++
++        std::deque<VideoItem> video;
++        std::deque<AudioItem> audio;
++        {
++            std::unique_lock<std::mutex> l(m_mutex);
++            m_cv.wait_for(l, std::chrono::milliseconds(10), [this]() {
++                return m_quit.load(std::memory_order_relaxed) || !m_video.empty() || !m_audio.empty();
++            });
++            video.swap(m_video);
++            audio.swap(m_audio);
++            m_audioFramesQueued = 0;
++        }
++
++        serialize(video, audio);
++        trimOut();
++        flushOut();
++    }
++}
++
++bool PCSX::MediaStream::acceptClient(int listenFd) {
++    int fd = ::accept(listenFd, nullptr, nullptr);
++    if (fd < 0) return false;
++
++    int flags = ::fcntl(fd, F_GETFL, 0);
++    if (flags >= 0) ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
++    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
++
++    Hello hello = {};
++    hello.magic = kHelloMagic;
++    hello.version = kVersion;
++    hello.headerSize = sizeof(PacketHeader);
++    hello.audioRate = m_audioRate.load();
++    hello.audioChannels = 2;
++    hello.videoMaxWidth = kOutWidth;
++    hello.videoMaxHeight = kOutHeight;
++
++    m_clientFd = fd;
++    m_out.clear();
++    m_outBytes = 0;
++    m_outPackets = 0;
++    m_outOffset = 0;
++
++    std::vector<uint8_t> packet(sizeof(hello));
++    std::memcpy(packet.data(), &hello, sizeof(hello));
++    enqueueOut(std::move(packet));
++
++    // Anything queued before the consumer arrived describes a moment it never saw.
++    {
++        std::lock_guard<std::mutex> l(m_mutex);
++        m_video.clear();
++        m_audio.clear();
++        m_audioFramesQueued = 0;
++    }
++
++    m_connects++;
++    m_wants.store(true);
++    g_system->printf("STREAM consumer attached\n");
++    return true;
++}
++
++void PCSX::MediaStream::dropClient(const char *why) {
++    m_wants.store(false);
++    if (m_clientFd >= 0) {
++        ::close(m_clientFd);
++        m_clientFd = -1;
++    }
++    m_out.clear();
++    m_outBytes = 0;
++    m_outPackets = 0;
++    m_outOffset = 0;
++    {
++        std::lock_guard<std::mutex> l(m_mutex);
++        m_video.clear();
++        m_audio.clear();
++        m_audioFramesQueued = 0;
++    }
++    m_disconnects++;
++    g_system->printf("STREAM consumer detached: %s\n", why);
++}
++
++void PCSX::MediaStream::serialize(std::deque<VideoItem> &video, std::deque<AudioItem> &audio) {
++    // Audio first: a late frame is a glitch on screen, a late sample is a gap in the sound.
++    for (auto &item : audio) {
++        const uint32_t payloadLen = static_cast<uint32_t>(item.frames.size() * sizeof(AudioFrame));
++        PacketHeader header = {};
++        header.magic = kPacketMagic;
++        header.type = static_cast<uint8_t>(PacketType::Audio);
++        header.format = 0;  // signed 16-bit interleaved
++        header.width = 2;
++        header.height = static_cast<uint16_t>(item.frames.size());
++        header.aux = static_cast<uint16_t>(item.sampleRate > 0xffff ? 0 : item.sampleRate);
++        header.payloadLen = payloadLen;
++        header.timestampUs = item.timestampUs;
++
++        std::vector<uint8_t> packet(sizeof(header) + payloadLen);
++        std::memcpy(packet.data(), &header, sizeof(header));
++        std::memcpy(packet.data() + sizeof(header), item.frames.data(), payloadLen);
++        enqueueOut(std::move(packet));
++        m_audioPacketsSent++;
++    }
++
++    static std::vector<uint8_t> scratch;
++    for (auto &item : video) {
++        normalize(item, scratch);
++        const uint32_t payloadLen = static_cast<uint32_t>(scratch.size());
++        PacketHeader header = {};
++        header.magic = kPacketMagic;
++        header.type = static_cast<uint8_t>(PacketType::Video);
++        header.format = static_cast<uint8_t>(kOutFormat);
++        header.width = kOutWidth;
++        header.height = kOutHeight;
++        header.aux = 0;
++        header.payloadLen = payloadLen;
++        header.timestampUs = item.timestampUs;
++
++        std::vector<uint8_t> packet(sizeof(header) + payloadLen);
++        std::memcpy(packet.data(), &header, sizeof(header));
++        std::memcpy(packet.data() + sizeof(header), scratch.data(), payloadLen);
++        enqueueOut(std::move(packet));
++        m_videoQueued++;
++    }
++}
++
++// Scales the displayed frame to the fixed export size and expands it to RGB24, on the exporter
++// thread. Nearest-neighbour is deliberate: the point is a constant stream a consumer never has to
++// re-negotiate, and a sharper filter here would cost the host CPU that the two emulators need.
++void PCSX::MediaStream::normalize(const VideoItem &item, std::vector<uint8_t> &out) {
++    out.resize(static_cast<size_t>(kOutWidth) * kOutHeight * 2);
++    const auto *src = static_cast<const uint8_t *>(item.data.data());
++    const bool rgb24 = item.format == VideoFormat::RGB888;
++    const unsigned bytesPerPixel = rgb24 ? 3 : 2;
++    const unsigned srcStride = item.width * bytesPerPixel;
++
++    // A frame smaller than its own geometry claims would be read past its end. Black is a poor
++    // picture; reading someone else's memory to fill it is worse.
++    if (item.data.size() < static_cast<size_t>(srcStride) * item.height) {
++        std::fill(out.begin(), out.end(), 0);
++        return;
++    }
++
++    // The column each output pixel reads from never changes within a frame, so the divisions are
++    // done once per frame rather than once per pixel.
++    static std::vector<unsigned> columns;
++    static unsigned columnsFor = 0;
++    if (columnsFor != item.width) {
++        columns.resize(kOutWidth);
++        for (unsigned x = 0; x < kOutWidth; x++) columns[x] = x * item.width / kOutWidth;
++        columnsFor = item.width;
++    }
++
++    for (unsigned y = 0; y < kOutHeight; y++) {
++        const unsigned sy = y * item.height / kOutHeight;
++        const uint8_t *srcRow = src + static_cast<size_t>(sy) * srcStride;
++        uint8_t *dstRow = out.data() + static_cast<size_t>(y) * kOutWidth * 2;
++        for (unsigned x = 0; x < kOutWidth; x++) {
++            const unsigned sx = columns[x];
++            uint16_t pixel;
++            if (rgb24) {
++                // The 24bpp display mode only appears during FMV. Folding it down to the console's
++                // own 15-bit colour keeps one format on the wire for the price of banding on the
++                // intro, which is a better trade than a stream the consumer cannot drain.
++                const uint8_t *rgb = srcRow + sx * 3;
++                pixel = (rgb[0] >> 3) | ((rgb[1] >> 3) << 5) | ((rgb[2] >> 3) << 10);
++            } else {
++                pixel = srcRow[sx * 2] | (srcRow[sx * 2 + 1] << 8);
++            }
++            dstRow[x * 2 + 0] = pixel & 0xff;
++            dstRow[x * 2 + 1] = pixel >> 8;
++        }
++    }
++}
++
++void PCSX::MediaStream::enqueueOut(std::vector<uint8_t> &&packet) {
++    m_outBytes += packet.size();
++    m_outPackets++;
++    m_out.push_back(std::move(packet));
++}
++
++// Keeps the backlog bounded when the consumer reads slower than the emulator produces. The oldest
++// whole packet goes first, so what survives is the most recent picture rather than the longest
++// queue; the packet currently half-written to the socket is never touched, because removing it
++// would leave a torn packet on the wire.
++void PCSX::MediaStream::trimOut() {
++    const size_t firstRemovable = m_outOffset > 0 ? 1 : 0;
++    while (m_outBytes.load() > kMaxOutBytes && m_out.size() > firstRemovable + 1) {
++        m_outBytes -= m_out[firstRemovable].size();
++        m_outPackets--;
++        m_out.erase(m_out.begin() + firstRemovable);
++        m_outDropped++;
++    }
++}
++
++bool PCSX::MediaStream::flushOut() {
++    while (!m_out.empty()) {
++        auto &front = m_out.front();
++        ssize_t n = ::send(m_clientFd, front.data() + m_outOffset, front.size() - m_outOffset, MSG_NOSIGNAL);
++        if (n > 0) {
++            m_outOffset += static_cast<size_t>(n);
++            m_outBytes -= static_cast<size_t>(n);
++            m_bytesSent += static_cast<uint64_t>(n);
++            if (m_outOffset >= front.size()) {
++                m_out.pop_front();
++                m_outPackets--;
++                m_outOffset = 0;
++            }
++            continue;
++        }
++        if (n < 0 && errno == EINTR) continue;
++        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++            struct pollfd pfd = {m_clientFd, POLLOUT, 0};
++            int r = ::poll(&pfd, 1, 20);
++            if (r > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
++                dropClient("hangup");
++                return false;
++            }
++            // Still not writable: leave the rest queued rather than blocking the producers, and let
++            // the next pass trim it if the consumer never catches up.
++            if (r <= 0) return true;
++            continue;
++        }
++        dropClient(strerror(errno));
++        return false;
++    }
++    return true;
++}
++
++void PCSX::MediaStream::pushVideo(Slice &&pixels, uint16_t width, uint16_t height, VideoFormat format) {
++    if (!wants()) return;
++    if (width == 0 || height == 0 || pixels.size() == 0) return;
++
++    auto start = std::chrono::steady_clock::now();
++    VideoItem item;
++    item.data = std::move(pixels);
++    item.width = width;
++    item.height = height;
++    item.format = format;
++    item.timestampUs = nowUs();
++
++    {
++        std::lock_guard<std::mutex> l(m_mutex);
++        while (m_video.size() >= kMaxVideoQueued) {
++            m_video.pop_front();
++            m_videoDropped++;
++        }
++        m_video.push_back(std::move(item));
++    }
++    m_cv.notify_one();
++    m_videoPushed++;
++
++    uint64_t spentUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
++                           .count();
++    uint64_t previous = m_pushMaxUs.load(std::memory_order_relaxed);
++    while (spentUs > previous && !m_pushMaxUs.compare_exchange_weak(previous, spentUs)) {
++    }
++}
++
++void PCSX::MediaStream::pushAudio(const AudioFrame *frames, size_t count, uint32_t sampleRate) {
++    m_audioRate.store(sampleRate, std::memory_order_relaxed);
++    if (!wants() || count == 0) return;
++
++    AudioItem item;
++    item.frames.assign(frames, frames + count);
++    item.sampleRate = sampleRate;
++    item.timestampUs = nowUs();
++
++    {
++        std::lock_guard<std::mutex> l(m_mutex);
++        while (m_audioFramesQueued + count > kMaxAudioFramesQueued && !m_audio.empty()) {
++            size_t dropped = m_audio.front().frames.size();
++            m_audio.pop_front();
++            m_audioFramesQueued -= dropped;
++            m_audioFramesDropped += dropped;
++        }
++        m_audioFramesQueued += count;
++        m_audio.push_back(std::move(item));
++    }
++    m_cv.notify_one();
++    m_audioFramesPushed += count;
++}
++
++// Reported on a wall-clock interval and in deltas, matching the SIO1 SPEED line, so a rate can be
++// read off any single line. Drop counters are cumulative and never reset: an export that silently
++// throws frames away looks exactly like one that works.
++void PCSX::MediaStream::tick() {
++    if (!m_enabled.load(std::memory_order_relaxed)) return;
++
++    constexpr auto kReportInterval = std::chrono::seconds(2);
++    static auto lastWall = std::chrono::steady_clock::now();
++    static uint64_t lastVideoPushed = 0, lastVideoQueued = 0, lastVideoDropped = 0, lastAudioPushed = 0,
++                    lastAudioDropped = 0, lastAudioPackets = 0, lastBytes = 0, lastOutDropped = 0;
++    static bool primed = false;
++
++    auto now = std::chrono::steady_clock::now();
++    if (now - lastWall < kReportInterval) return;
++    double wallMs = std::chrono::duration<double, std::milli>(now - lastWall).count();
++
++    uint64_t videoPushed = m_videoPushed.load(), videoQueued = m_videoQueued.load(),
++             videoDropped = m_videoDropped.load();
++    uint64_t audioPushed = m_audioFramesPushed.load(), audioDropped = m_audioFramesDropped.load();
++    uint64_t audioPackets = m_audioPacketsSent.load(), bytes = m_bytesSent.load(), outDropped = m_outDropped.load();
++
++    if (!primed) {
++        primed = true;
++    } else {
++        g_system->printf(
++            "STREAM client=%d wallMs=%.1f video pushed=%llu queued=%llu dropped=%llu fps=%.1f | "
++            "audio frames=%llu dropped=%llu packets=%llu rate=%u | out bytes=%llu (%.2f MB/s) backlog=%zu/%zuB "
++            "dropped=%llu | pushMaxUs=%llu conn=%llu/%llu\n",
++            m_wants.load() ? 1 : 0, wallMs, (unsigned long long)(videoPushed - lastVideoPushed),
++            (unsigned long long)(videoQueued - lastVideoQueued), (unsigned long long)(videoDropped - lastVideoDropped),
++            (videoPushed - lastVideoPushed) * 1000.0 / wallMs, (unsigned long long)(audioPushed - lastAudioPushed),
++            (unsigned long long)(audioDropped - lastAudioDropped),
++            (unsigned long long)(audioPackets - lastAudioPackets), m_audioRate.load(),
++            (unsigned long long)(bytes - lastBytes), (bytes - lastBytes) / 1048.576 / wallMs, m_outPackets.load(),
++            m_outBytes.load(), (unsigned long long)(outDropped - lastOutDropped),
++            (unsigned long long)m_pushMaxUs.exchange(0),
++            (unsigned long long)m_connects.load(), (unsigned long long)m_disconnects.load());
++    }
++
++    lastWall = now;
++    lastVideoPushed = videoPushed;
++    lastVideoQueued = videoQueued;
++    lastVideoDropped = videoDropped;
++    lastAudioPushed = audioPushed;
++    lastAudioDropped = audioDropped;
++    lastAudioPackets = audioPackets;
++    lastBytes = bytes;
++    lastOutDropped = outDropped;
++}
++
++#endif
+diff --git a/src/support/mediastream.h b/src/support/mediastream.h
+new file mode 100644
+index 00000000..d9bf7eb9
+--- /dev/null
++++ b/src/support/mediastream.h
+@@ -0,0 +1,203 @@
++/*
++
++MIT License
++
++Copyright (c) 2026 PCSX-Redux authors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++*/
++
++#pragma once
++
++#include <atomic>
++#include <condition_variable>
++#include <cstdint>
++#include <deque>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "support/slice.h"
++
++namespace PCSX {
++
++// Publishes finished frames and mixed audio to a local consumer over a unix domain socket, so a
++// windowless instance can be watched and heard elsewhere.
++//
++// The socket is deliberately local-only. The consumer is a separate process that owns encoding and
++// whatever it puts on the network; nothing here listens on a network address, and this channel
++// carries only pixels and samples — never the emulator's Lua, memory or file surfaces.
++//
++// Producers run on the emulation thread (video) and the audio device thread (audio). Neither may
++// ever block on the consumer: both hand their data to bounded queues that drop, and count, when the
++// consumer cannot keep up. The exporter thread does all of the I/O and holds no lock while writing.
++class MediaStream {
++  public:
++    struct AudioFrame {
++        int16_t L = 0, R = 0;
++    };
++
++    // How the payload of a video packet is laid out. Both come straight out of VRAM: BGR555 is a
++    // little-endian 16-bit word per pixel with the top bit as the mask bit, RGB888 is the 24bpp
++    // display mode used by FMV.
++    enum class VideoFormat : uint8_t { BGR555 = 0, RGB888 = 1 };
++
++    static MediaStream &get();
++
++    // Binds and listens on socketPath, replacing any stale socket left by a previous run, and
++    // starts the exporter thread. A failure to bind disables the stream and leaves the emulator
++    // running: a missing stream is a degraded instance, not a dead one.
++    void start(const std::string &socketPath);
++    void stop();
++
++    bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
++    // True only while a consumer is attached. Producers test this before doing any work at all, so
++    // an instance nobody is watching pays nothing beyond the load.
++    bool wants() const { return m_wants.load(std::memory_order_relaxed); }
++
++    // Takes ownership of the pixel buffer. Called on the emulation thread once per displayed frame.
++    void pushVideo(Slice &&pixels, uint16_t width, uint16_t height, VideoFormat format);
++    // Called on the audio device thread with the mix that would otherwise reach the speakers.
++    void pushAudio(const AudioFrame *frames, size_t count, uint32_t sampleRate);
++
++    // Emits the STREAM diagnostic line on a wall-clock interval. Called from the emulation thread.
++    void tick();
++
++    static constexpr uint32_t kHelloMagic = 0x534c3150;   // "P1LS"
++    static constexpr uint32_t kPacketMagic = 0x4b503150;  // "P1PK"
++    static constexpr uint16_t kVersion = 1;
++
++    enum class PacketType : uint8_t { Video = 1, Audio = 2 };
++
++    // Both structs are written and read as little-endian, which is what every host this runs on is.
++    struct Hello {
++        uint32_t magic;
++        uint16_t version;
++        uint16_t headerSize;
++        uint32_t audioRate;
++        uint16_t audioChannels;
++        uint16_t videoMaxWidth;
++        uint16_t videoMaxHeight;
++        uint16_t reserved;
++        uint32_t flags;
++    };
++    static_assert(sizeof(Hello) == 24);
++
++    struct PacketHeader {
++        uint32_t magic;
++        uint8_t type;
++        uint8_t format;
++        uint16_t width;   // audio: channel count
++        uint16_t height;  // audio: frame count
++        uint16_t aux;     // audio: sample rate in Hz; video: unused
++        uint32_t payloadLen;
++        uint64_t timestampUs;  // monotonic, taken when the producer handed the data over
++    };
++    static_assert(sizeof(PacketHeader) == 24);
++
++  private:
++    MediaStream() = default;
++    ~MediaStream() { stop(); }
++    MediaStream(const MediaStream &) = delete;
++    MediaStream &operator=(const MediaStream &) = delete;
++
++    struct VideoItem {
++        Slice data;
++        uint16_t width = 0, height = 0;
++        VideoFormat format = VideoFormat::BGR555;
++        uint64_t timestampUs = 0;
++    };
++    struct AudioItem {
++        std::vector<AudioFrame> frames;
++        uint32_t sampleRate = 0;
++        uint64_t timestampUs = 0;
++    };
++
++    void run();
++    void normalize(const VideoItem &item, std::vector<uint8_t> &out);
++    bool acceptClient(int listenFd);
++    void dropClient(const char *why);
++    void serialize(std::deque<VideoItem> &video, std::deque<AudioItem> &audio);
++    void enqueueOut(std::vector<uint8_t> &&packet);
++    bool flushOut();
++    void trimOut();
++    uint64_t nowUs() const;
++
++    // Every frame leaves at this size and in this format, whatever the PS1 was displaying. The
++    // console changes resolution and bit depth as it runs — 320x240 24bpp for FMV, 512x240 16bpp
++    // for menus — and a consumer that has to follow those changes must rebuild its decoder each
++    // time, which produces flashing, gaps in the audio and resets of the stream's clock.
++    //
++    // The size and format are chosen for bytes per second, not for fidelity. 512x240 in the
++    // console's own 16bpp is ~15 MB/s, which the consumer drains comfortably; normalising to
++    // 640x480 RGB24 instead was ~53 MB/s and the consumer could not keep up, so frames and audio
++    // were dropped and the result was worse than doing nothing. Upscaling belongs in the encoder,
++    // which does it for free on the way to h264.
++    static constexpr uint16_t kOutWidth = 512;
++    static constexpr uint16_t kOutHeight = 240;
++    static constexpr VideoFormat kOutFormat = VideoFormat::BGR555;
++
++    // A frame every 16.6 ms against a consumer that reads promptly: three slots absorb a scheduling
++    // hiccup, and anything past that is better dropped than queued into latency.
++    static constexpr size_t kMaxVideoQueued = 3;
++    // A quarter of a second of 44.1 kHz stereo. Past this the consumer is not coming back.
++    static constexpr size_t kMaxAudioFramesQueued = 11025;
++    // Ceiling on bytes waiting for a socket that is not draining. Roughly four full 24bpp frames.
++    static constexpr size_t kMaxOutBytes = 4 * 1024 * 1024;
++
++    std::atomic<bool> m_enabled{false};
++    std::atomic<bool> m_wants{false};
++    std::atomic<bool> m_quit{false};
++    std::string m_socketPath;
++    int m_listenFd = -1;
++    int m_clientFd = -1;
++    std::thread m_thread;
++
++    std::mutex m_mutex;
++    std::condition_variable m_cv;
++    std::deque<VideoItem> m_video;
++    std::deque<AudioItem> m_audio;
++    size_t m_audioFramesQueued = 0;
++
++    // Owned by the exporter thread alone; the two sizes are atomic only so the diagnostic line can
++    // read them from the emulation thread.
++    std::deque<std::vector<uint8_t>> m_out;
++    std::atomic<size_t> m_outBytes{0};
++    std::atomic<size_t> m_outPackets{0};
++    size_t m_outOffset = 0;
++
++    // Cumulative and uncapped, so a rate can always be differenced out of two lines and an absence
++    // of failures is never an artefact of a counter that stopped counting.
++    std::atomic<uint64_t> m_videoPushed{0};
++    std::atomic<uint64_t> m_videoDropped{0};
++    std::atomic<uint64_t> m_videoQueued{0};
++    std::atomic<uint64_t> m_audioFramesPushed{0};
++    std::atomic<uint64_t> m_audioFramesDropped{0};
++    std::atomic<uint64_t> m_audioPacketsSent{0};
++    std::atomic<uint64_t> m_bytesSent{0};
++    std::atomic<uint64_t> m_outDropped{0};
++    std::atomic<uint64_t> m_connects{0};
++    std::atomic<uint64_t> m_disconnects{0};
++    std::atomic<uint64_t> m_pushMaxUs{0};
++    std::atomic<uint32_t> m_audioRate{0};
++};
++
++}  // namespace PCSX
+diff --git a/src/support/uvbind.h b/src/support/uvbind.h
+new file mode 100644
+index 00000000..8ebabe7b
+--- /dev/null
++++ b/src/support/uvbind.h
+@@ -0,0 +1,55 @@
++/*
++
++MIT License
++
++Copyright (c) 2026 PCSX-Redux authors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++*/
++
++#pragma once
++
++#include <uv.h>
++
++#include <cstdlib>
++
++namespace PCSX {
++
++namespace Uv {
++
++inline constexpr const char* c_loopbackAddress = "127.0.0.1";
++
++// Fills `addr` with the address every listening socket in the emulator binds to, and returns the
++// libuv result code. The web server, the GDB server and the SIO1 link listener all accept anything
++// that reaches them — they can read and write emulated memory, drive the pads, and write files —
++// so reaching them has to require access to the machine itself. Hence loopback by default.
++// PCSX_BIND_ADDRESS opts a trusted setup back out to a wider interface; a value that is not a valid
++// IPv4 address falls back to loopback rather than leaving the socket unbound.
++inline int makeBindAddress(unsigned port, sockaddr_in* addr) {
++    const char* host = std::getenv("PCSX_BIND_ADDRESS");
++    if ((host == nullptr) || (host[0] == 0)) host = c_loopbackAddress;
++    int result = uv_ip4_addr(host, port, addr);
++    if (result != 0) result = uv_ip4_addr(c_loopbackAddress, port, addr);
++    return result;
++}
++
++}  // namespace Uv
++
++}  // namespace PCSX
 diff --git a/src/support/uvfile.cc b/src/support/uvfile.cc
 index 2a14a6e9..8a6cb656 100644
 --- a/src/support/uvfile.cc
