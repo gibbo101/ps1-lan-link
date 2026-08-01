@@ -58,11 +58,19 @@ fi
 AUDIO_PORT="${AUDIO_PORT:-6692}"
 FPS="${FPS:-60}"
 
+# The bespoke audio client bounds the latency: it starts playback at the live edge instead of at
+# connect time, runs aplay with a small explicit buffer, and cuts accumulated drift rather than
+# playing it out. socat|aplay stays as the fallback, but it carries several hundred ms of buffer
+# and shows up as audio trailing the (now fast) picture.
 AUDIO_PID=""
-if command -v aplay >/dev/null && command -v socat >/dev/null; then
+if command -v aplay >/dev/null && [ -f "$HERE/ps1-join-audio.py" ]; then
+  python3 "$HERE/ps1-join-audio.py" "$HOST" --port "$AUDIO_PORT" &
+  AUDIO_PID=$!
+  echo "[join] audio pid=$AUDIO_PID from $HOST:$AUDIO_PORT (bounded)"
+elif command -v aplay >/dev/null && command -v socat >/dev/null; then
   socat -u "TCP:$HOST:$AUDIO_PORT" - 2>/dev/null | aplay -q -f S16_LE -r 44100 -c 2 -t raw - &
   AUDIO_PID=$!
-  echo "[join] audio pid=$AUDIO_PID from $HOST:$AUDIO_PORT"
+  echo "[join] audio pid=$AUDIO_PID from $HOST:$AUDIO_PORT (fallback socat|aplay)"
 else
   echo "[join] WARNING: aplay or socat missing - no sound"
 fi
