@@ -79,9 +79,19 @@ correct and the SPS/PPS handling difference is harmless.
   800 ms startup backlog skipped, a 400 ms injected burst cut back under the 80 ms threshold in
   three passes. Every cut must stay frame-aligned (4 bytes) or the channels phase-shift into
   static. **Confirmed in play by the tester, same day.**
-- **Untouched:** the SIO1 stall asymmetry (instB ~87% in-game) and the session-12 instA deadlock.
-  Two 2-minute single-instance headless runs on Deck 1 this session sat at menus without
-  deadlocking, but that is not the repro condition (no link, no Game Mode).
+- **The stall asymmetry: largely resolved same day with `LINK_ACK_WINDOW=16`.** With the ack live
+  (acks fired both sides) instB played at median 88.3% (p10 80.9) at the default window 8. Raising
+  to 16 in Deck 1's `gamemode.conf`: over a sustained real match, **instB median 100.4%**
+  (p10 86.5, dips to ~80 in heavy moments), instA steady at 100, and a build race completed in
+  sync on both screens — the deep-FIFO tolerance held in play. Window 32 was armed but never
+  tested; 16 is the locked, validated setting. If the mid-80s dips ever matter: try 32 (one conf
+  line, watch match start), or set instA's native speed scaler (`"Scaler"` in pcsx.json, percent —
+  it is the GUI's Speed Scaler) to match for uniform feel. Note the per-match tx/acks roles swap
+  with match authority (blue team), not socket role — do not compare runs without checking which
+  side was transmitting.
+- **Still open:** the session-12 instA deadlock. Two 2-minute single-instance headless runs on
+  Deck 1 this session sat at menus without deadlocking, but that is not the repro condition
+  (no link, no Game Mode).
 
 ### Capture/replay rig (new, keep)
 
