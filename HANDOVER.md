@@ -63,12 +63,11 @@ correct and the SPS/PPS handling difference is harmless.
 ### What is actually deployed / still to do
 
 - **Deck 1: done** — fixed `stream-host.py` in place; relaunch the host app to pick it up.
-- **Deck 2: pending** — the verified player binary + `stream-join.sh` need copying, the stale
-  `ps1-join-player.disabled` deleting, and `PLAYER=ffplay` dropping from `join.conf`.
-  `install-joiner.sh deck2 192.168.0.104` does all of it (join.conf is rewritten without
-  the PLAYER line; auto-select prefers the bespoke player), then
-  `ssh deck@deck2 rm -f /home/deck/ps1-lan-link/stream/ps1-join-player.disabled`.
-  Deck 1's DHCP address was still `.104` on 2026-08-01.
+- **Deck 2: done** — verified player deployed (md5 `3749027e…`, loads on the Deck), stale
+  `.disabled` binary deleted, `PLAYER=ffplay` dropped from `join.conf` so auto-select takes the
+  bespoke player. `HOST=192.168.0.104` still matches Deck 1's DHCP address on 2026-08-01. If the
+  bespoke player misbehaves in play, backout is `PLAYER=ffplay` in `join.conf` — ffplay still works
+  and the host-side fix alone removes most of the lag.
 - **Feel-test:** joiner menu responsiveness is the thing to test — it should now track the pad.
   If it does, input lag is closed and the remaining joiner delta is ffplay-vs-bespoke polish.
 - **Untouched:** the SIO1 stall asymmetry (instB ~87% in-game) and the session-12 instA deadlock.
