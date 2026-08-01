@@ -324,7 +324,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < SDL_NumJoysticks(); i++) open_pad(i);
 
     SDL_Window *window = SDL_CreateWindow(
-        "PS1 LAN Link", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 800,
+        "PS1 Link Cable", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 800,
         windowed ? SDL_WINDOW_SHOWN : SDL_WINDOW_FULLSCREEN_DESKTOP);
     if (!window) {
         fprintf(stderr, "[menu] SDL_CreateWindow: %s\n", SDL_GetError());
@@ -406,7 +406,7 @@ int main(int argc, char **argv) {
 
         SDL_SetRenderDrawColor(rend, BG.r, BG.g, BG.b, 255);
         SDL_RenderClear(rend);
-        draw_text(rend, font_big, "PS1 LAN LINK", 90, 70, GOLD);
+        draw_text(rend, font_big, "PS1 LINK CABLE", 90, 70, GOLD);
 
         int y = 220;
         if (screen == SCREEN_MAIN) {

@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=PS1 LAN Link
-Comment=Red Alert Retaliation link-cable over LAN
+Name=PS1 Link Cable
+Comment=PS1 link-cable play over LAN — host or join, any supported game
 Exec=/home/deck/ps1-lan-link/ps1-link.sh
 Path=/home/deck/ps1-lan-link
 Icon=/home/deck/ps1-lan-link/emu/squashfs-root/pcsx-redux.png
