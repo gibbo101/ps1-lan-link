@@ -29,3 +29,4 @@ docs/session7-evidence/*-run.log
 
 # Built by deploy/deck/stream/player/build.sh from the .c beside it.
 /deploy/deck/stream/player/ps1-join-player
+/deploy/deck/menu/ps1-link-menu

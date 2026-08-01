@@ -22,7 +22,7 @@ ssh "deck@$HOST" 'command -v ffplay >/dev/null' || { echo "[joiner] ffplay missi
 ssh "deck@$HOST" 'command -v python3 >/dev/null' || { echo "[joiner] python3 missing on $HOST"; exit 1; }
 
 ssh "deck@$HOST" "mkdir -p $REMOTE/stream"
-scp -q "$HERE/stream-join.sh" "$HERE/pad-forward.py" "deck@$HOST:$REMOTE/stream/"
+scp -q "$HERE/stream-join.sh" "$HERE/pad-forward.py" "$HERE/ps1-join-audio.py" "deck@$HOST:$REMOTE/stream/"
 # The player is optional: a Deck without it falls back to ffplay, which is why this does not fail
 # the install when the binary has not been built yet.
 [ -x "$HERE/player/ps1-join-player" ] && scp -q "$HERE/player/ps1-join-player" "deck@$HOST:$REMOTE/stream/"
@@ -39,10 +39,29 @@ INPUT_PORT=6691
 # PAD_DEVICE=/dev/input/js0   # set only if the wrong pad is picked up
 EOF
 
+# The unified app: same menu, same launcher, same shortcut name as the hosting Deck. A Deck with
+# no roms simply gets "Host a game" greyed out, so one install script serves any role.
+if [ -x "$HERE/../menu/ps1-link-menu" ]; then
+  ssh "deck@$HOST" "mkdir -p $REMOTE/menu"
+  scp -q "$HERE/../menu/ps1-link-menu" "deck@$HOST:$REMOTE/menu/"
+  scp -q "$HERE/../games.conf" "deck@$HOST:$REMOTE/games.conf"
+  scp -q "$HERE/../ps1-link-unified.sh" "deck@$HOST:$REMOTE/ps1-link.sh"
+  scp -q "$HERE/../ps1-lan-link.desktop" "deck@$HOST:$REMOTE/"
+  ssh "deck@$HOST" "chmod +x $REMOTE/menu/ps1-link-menu $REMOTE/ps1-link.sh"
+else
+  echo "[joiner] menu binary not built — skipping the unified app (run deploy/deck/menu/build.sh)"
+fi
+
 # A Steam shortcut, not an SSH command: in Game Mode gamescope composites one app, so a player
 # needs the joiner launched *as* the game or it is neither presented nor given a pad by Steam Input.
+# The unified entry is preferred; the direct Join entry stays as a fallback.
 scp -q "$HERE/ps1-lan-link-join.desktop" "deck@$HOST:$REMOTE/stream/"
 if ssh "deck@$HOST" "command -v steamos-add-to-steam >/dev/null"; then
+  if ssh "deck@$HOST" "[ -f $REMOTE/ps1-lan-link.desktop ]"; then
+    ssh "deck@$HOST" "steamos-add-to-steam $REMOTE/ps1-lan-link.desktop" \
+      && echo "[joiner] registered 'PS1 LAN Link' (unified) in the Steam library" \
+      || echo "[joiner] WARNING: could not register the unified shortcut"
+  fi
   ssh "deck@$HOST" "steamos-add-to-steam $REMOTE/stream/ps1-lan-link-join.desktop" \
     && echo "[joiner] registered 'PS1 LAN Link — Join' in the Steam library" \
     || echo "[joiner] WARNING: steamos-add-to-steam failed — add the shortcut by hand in Game Mode"

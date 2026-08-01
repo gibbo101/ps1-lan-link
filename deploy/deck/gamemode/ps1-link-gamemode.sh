@@ -315,9 +315,13 @@ fi
 # actually connects, so a solo or couch session pays nothing for it being here.
 if [ "$STREAM" = 1 ]; then
   if [ -x "$DIR/stream/stream-host.py" ]; then
+    # The beacon is what a joiner's menu lists, so it carries the game's display name. Launched
+    # outside the unified menu there is no label; announce the cue's basename rather than nothing,
+    # or the host is invisible to discovery.
+    BEACON_LABEL="${GAME_LABEL:-$(basename "${CUE:-unknown}" .cue)}"
     python3 "$DIR/stream/stream-host.py" \
       --export-socket "$STREAM_SOCK" --port "$STREAM_PORT" --input-port "$STREAM_INPUT_PORT" \
-      --control-port "$WEB_B" > "$GM/stream-host.log" 2>&1 &
+      --control-port "$WEB_B" --beacon-game "$BEACON_LABEL" > "$GM/stream-host.log" 2>&1 &
     PID_STREAM=$!
     echo "[gm] streamer pid=$PID_STREAM — joiners connect to $(hostname -I 2>/dev/null | awk '{print $1}'):$STREAM_PORT"
   else

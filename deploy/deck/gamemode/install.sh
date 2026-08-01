@@ -42,9 +42,15 @@ echo "[install] copying the streamer"
 scp -q "$PD/deploy/deck/stream/stream-host.py" "deck@$HOST:$REMOTE/stream/"
 ssh "deck@$HOST" "chmod +x $REMOTE/stream/stream-host.py"
 
+echo "[install] copying the menu and unified launcher"
+ssh "deck@$HOST" "mkdir -p $REMOTE/menu"
+[ -x "$PD/deploy/deck/menu/ps1-link-menu" ] || { echo "[install] menu binary missing — run deploy/deck/menu/build.sh"; exit 1; }
+scp -q "$PD/deploy/deck/menu/ps1-link-menu" "deck@$HOST:$REMOTE/menu/"
+scp -q "$PD/deploy/deck/games.conf" "deck@$HOST:$REMOTE/games.conf"
+
 # The Steam shortcut "PS1 LAN Link" already points at ps1-link.sh. Taking that name over is what
-# lets Stage 1 launch from the existing Game Mode entry without editing Steam's shortcuts.vdf.
-# The previous script is kept beside it; restoring it is one mv.
+# lets the unified app launch from the existing Game Mode entry without editing Steam's
+# shortcuts.vdf. A previous foreign script is kept beside it; restoring it is one mv.
 ssh "deck@$HOST" bash -s <<EOF
 set -e
 cd $REMOTE
@@ -52,14 +58,15 @@ if [ -f ps1-link.sh ] && ! grep -q 'gamemode/ps1-link-gamemode.sh' ps1-link.sh; 
   mv ps1-link.sh ps1-link-netpeer.sh
   echo "[install] kept previous launcher as ps1-link-netpeer.sh"
 fi
-cat > ps1-link.sh <<'SHIM'
-#!/usr/bin/env bash
-# Steam shortcut target. Stage 1 of the unified app lives in gamemode/.
-exec "\$(dirname "\$0")/gamemode/ps1-link-gamemode.sh" "\$@"
-SHIM
-chmod +x ps1-link.sh
-[ -f gamemode/gamemode.conf ] || printf 'GAME=retaliation\nPAD_ID=0\nFULLSCREEN=1\nCTL=1\n' > gamemode/gamemode.conf
+chmod +x menu/ps1-link-menu
+[ -f gamemode/gamemode.conf ] || printf 'GAME=retaliation\nPAD_ID=0\nFULLSCREEN=1\nCTL=1\nLINK_LOCAL_ACK=1\nLINK_ACK_WINDOW=16\n' > gamemode/gamemode.conf
+# Existing installs keep their conf but must gain the validated link tuning (2026-08-01: the ack
+# with window 16 is what holds the streamed side at full speed).
+grep -q '^LINK_LOCAL_ACK=' gamemode/gamemode.conf || echo 'LINK_LOCAL_ACK=1' >> gamemode/gamemode.conf
+grep -q '^LINK_ACK_WINDOW=' gamemode/gamemode.conf || echo 'LINK_ACK_WINDOW=16' >> gamemode/gamemode.conf
 EOF
+scp -q "$PD/deploy/deck/ps1-link-unified.sh" "deck@$HOST:$REMOTE/ps1-link.sh"
+ssh "deck@$HOST" "chmod +x $REMOTE/ps1-link.sh"
 
 echo "[install] done. Available discs there:"
 ssh "deck@$HOST" "ls $REMOTE/roms/*.cue 2>/dev/null | xargs -n1 basename"

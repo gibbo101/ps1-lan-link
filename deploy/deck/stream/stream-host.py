@@ -352,6 +352,31 @@ class PadBridge:
                 log(f"pad bridge failed {self.failures}x (latest: {error})")
 
 
+def beacon(args):
+    """Announces this host on the LAN so a joiner can find it without configuration.
+
+    One small UDP broadcast a second: who is hosting, what game, where the stream is. Discovery is
+    the only piece of the wire format that names a machine, so it carries the address implicitly
+    (the datagram's source) rather than in the payload — a host cannot claim to be elsewhere.
+    Broadcast needs no privileges and no discovery daemon on the network.
+    """
+    import json
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    payload = json.dumps({
+        "ps1lanlink": 1,
+        "name": args.beacon_name,
+        "game": args.beacon_game,
+        "port": args.port,
+    }).encode()
+    while running:
+        try:
+            sock.sendto(payload, ("255.255.255.255", args.beacon_port))
+        except OSError:
+            pass  # a wifi blip should not kill the announcer
+        time.sleep(1.0)
+
+
 def serve_video(args, client):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -426,6 +451,10 @@ def main():
     parser.add_argument("--audio-rate", type=int, default=44100)
     parser.add_argument("--runtime-dir", default=os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
     parser.add_argument("--stats-interval", type=float, default=5.0)
+    parser.add_argument("--beacon-game", default=None,
+                        help="announce this host on the LAN, naming the game being hosted")
+    parser.add_argument("--beacon-name", default=socket.gethostname())
+    parser.add_argument("--beacon-port", type=int, default=6693)
     args = parser.parse_args()
 
     if args.export_socket is None:
@@ -446,6 +475,9 @@ def main():
     threading.Thread(target=serve_video, args=(args, client), daemon=True).start()
     threading.Thread(target=audio.serve, daemon=True).start()
     threading.Thread(target=serve_input, args=(args, bridge), daemon=True).start()
+    if args.beacon_game:
+        threading.Thread(target=beacon, args=(args,), daemon=True).start()
+        log(f"announcing '{args.beacon_game}' as {args.beacon_name} on UDP {args.beacon_port}")
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     for attempt in range(60):
