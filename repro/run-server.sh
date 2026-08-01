@@ -7,7 +7,9 @@
 # it is exported here rather than in the emulator's default because this script is the one case that
 # genuinely needs a peer on another machine.
 set -euo pipefail
-export PCSX_BIND_ADDRESS="${PCSX_BIND_ADDRESS:-0.0.0.0}"
+# Loopback unless the operator explicitly widens it: the surface behind this bind can read and
+# write emulated memory and files, and a test rig has no business exposing that to a network.
+export PCSX_BIND_ADDRESS="${PCSX_BIND_ADDRESS:-127.0.0.1}"
 PD="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$PD/work/emu/squashfs-root/AppRun"
 BIOS="$PD/work/bios/scph7001.bin"

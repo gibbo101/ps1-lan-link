@@ -30,8 +30,13 @@ done
 # The emulator binds its listeners to loopback, because it accepts anything that reaches them and
 # re-points the link at the newest connection. This launcher is the one case whose peer is on
 # another machine, so a server here has to listen on an address that peer can reach.
+# This launcher is part of the abandoned deck-to-deck "netpeer" experiment (see HANDOVER: the
+# symmetric two-Deck link was measured and ruled out). It survives for experiments only, and it no
+# longer defaults to exposing the emulator: the control surface reachable on a wide bind can read
+# and write emulated memory and files, so the operator has to choose that exposure explicitly.
 if [ "$ROLE" = server ]; then
-  export PCSX_BIND_ADDRESS="${BIND_ADDRESS:-0.0.0.0}"
+  [ -n "${BIND_ADDRESS:-}" ] || { echo "[ps1-link] server role needs BIND_ADDRESS=<lan-addr> set explicitly (this exposes the emulator's control surface to that network)"; exit 1; }
+  export PCSX_BIND_ADDRESS="$BIND_ADDRESS"
   echo "[ps1-link] server: listening on $PCSX_BIND_ADDRESS:$PORT for the remote client"
 fi
 
