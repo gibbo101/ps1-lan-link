@@ -78,7 +78,7 @@ correct and the SPS/PPS handling difference is harmless.
   shrinks the pipe, and cuts accumulated drift in one frame-aligned drop, logged. Bench-verified:
   800 ms startup backlog skipped, a 400 ms injected burst cut back under the 80 ms threshold in
   three passes. Every cut must stay frame-aligned (4 bytes) or the channels phase-shift into
-  static. Awaiting the tester's in-play confirmation.
+  static. **Confirmed in play by the tester, same day.**
 - **Untouched:** the SIO1 stall asymmetry (instB ~87% in-game) and the session-12 instA deadlock.
   Two 2-minute single-instance headless runs on Deck 1 this session sat at menus without
   deadlocking, but that is not the repro condition (no link, no Game Mode).
