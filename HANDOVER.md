@@ -59,8 +59,8 @@ input (the FILE form consumes tokens across menu relaunches — the env form loo
 launcher's while-loop, found the hard way); full host/join flows ran against stub session scripts
 in a container; both Decks ran menu+launcher headless (`SDL_VIDEODRIVER=dummy`) over SSH; and
 **Deck 2's join screen discovered Deck 1's beacon over the real wifi** and returned
-`JOIN 192.168.0.104`. NOT yet verified: the visible fullscreen menu in Game Mode with a real
-controller — that is the tester's first launch. Traps encountered: `pkill -f` over SSH killed its own
+`JOIN 192.168.0.104`. The visible menu is now confirmed in Game Mode by the tester (2026-08-01 evening): fonts,
+fullscreen, controller input, and no on-screen keyboard (SDL_StopTextInput fix, `9751e6a`). Traps encountered: `pkill -f` over SSH killed its own
 session AGAIN (use `pkill -x`); a `-stream-socket` path over ~107 bytes is silently rejected
 (the emulator logs "socket path too long").
 
