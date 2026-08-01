@@ -168,6 +168,33 @@ static void draw_text(SDL_Renderer *r, TTF_Font *font, const char *text, int x, 
 
 typedef enum { ACT_NONE, ACT_UP, ACT_DOWN, ACT_SELECT, ACT_BACK } Action;
 
+// Joystick instance ids that are open as game controllers. A mapped controller reports every
+// press twice - once per API - so the raw joystick fallback must ignore these or one press
+// becomes two.
+static SDL_JoystickID g_mapped[16];
+static int g_n_mapped = 0;
+
+static bool is_mapped(SDL_JoystickID id) {
+    for (int i = 0; i < g_n_mapped; i++)
+        if (g_mapped[i] == id) return true;
+    return false;
+}
+
+// Opens index i by whichever API understands it, and says so - which API a pad landed on is the
+// first question when input is dead, so it is never left unsaid.
+static void open_pad(int i) {
+    if (SDL_IsGameController(i)) {
+        SDL_GameController *gc = SDL_GameControllerOpen(i);
+        if (gc && g_n_mapped < 16) {
+            g_mapped[g_n_mapped++] = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gc));
+            fprintf(stderr, "[menu] pad %d: %s (gamecontroller)\n", i, SDL_GameControllerName(gc));
+        }
+    } else {
+        SDL_Joystick *js = SDL_JoystickOpen(i);
+        if (js) fprintf(stderr, "[menu] pad %d: %s (raw joystick fallback)\n", i, SDL_JoystickName(js));
+    }
+}
+
 static Action translate(const SDL_Event *e) {
     if (e->type == SDL_QUIT) return ACT_BACK;
     if (e->type == SDL_KEYDOWN) {
@@ -193,6 +220,23 @@ static Action translate(const SDL_Event *e) {
         if (latched == 0 && v < -20000) { latched = -1; return ACT_UP; }
         if (latched == 0 && v > 20000) { latched = 1; return ACT_DOWN; }
         if (latched != 0 && v > -8000 && v < 8000) latched = 0;
+    }
+    // Raw joystick fallback, for a pad SDL has no controller mapping for. Xbox-layout guesses:
+    // button 0 = A/select, 1 = B/back, hat for the d-pad, axis 1 for the stick.
+    if (e->type == SDL_JOYBUTTONDOWN && !is_mapped(e->jbutton.which)) {
+        if (e->jbutton.button == 0) return ACT_SELECT;
+        if (e->jbutton.button == 1) return ACT_BACK;
+    }
+    if (e->type == SDL_JOYHATMOTION && !is_mapped(e->jhat.which)) {
+        if (e->jhat.value & SDL_HAT_UP) return ACT_UP;
+        if (e->jhat.value & SDL_HAT_DOWN) return ACT_DOWN;
+    }
+    if (e->type == SDL_JOYAXISMOTION && e->jaxis.axis == 1 && !is_mapped(e->jaxis.which)) {
+        static int jlatched = 0;
+        int v = e->jaxis.value;
+        if (jlatched == 0 && v < -20000) { jlatched = -1; return ACT_UP; }
+        if (jlatched == 0 && v > 20000) { jlatched = 1; return ACT_DOWN; }
+        if (jlatched != 0 && v > -8000 && v < 8000) jlatched = 0;
     }
     return ACT_NONE;
 }
@@ -264,13 +308,20 @@ int main(int argc, char **argv) {
 
     const bool windowed = getenv("MENU_WINDOWED") != NULL;
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "0");
+    // Under gamescope the menu can find itself unfocused - especially relaunched after a crashed
+    // session - and SDL's default is to deliver controller input only to the focused window,
+    // which reads as "every button is dead". A fullscreen menu is never a background app in any
+    // sense that matters, so take events regardless.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0 || TTF_Init() != 0) {
         fprintf(stderr, "[menu] SDL init: %s\n", SDL_GetError());
         return 2;
     }
     SDL_ShowCursor(SDL_DISABLE);
-    for (int i = 0; i < SDL_NumJoysticks(); i++)
-        if (SDL_IsGameController(i)) SDL_GameControllerOpen(i);
+    // SDL starts with text input active, and under gamescope an app accepting text input summons
+    // Steam's on-screen keyboard over the menu. Nothing here ever wants a keyboard.
+    SDL_StopTextInput();
+    for (int i = 0; i < SDL_NumJoysticks(); i++) open_pad(i);
 
     SDL_Window *window = SDL_CreateWindow(
         "PS1 LAN Link", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 800,
@@ -309,8 +360,16 @@ int main(int argc, char **argv) {
         Action act = autopilot_next();
         SDL_Event e;
         while (act == ACT_NONE && SDL_PollEvent(&e)) {
-            if (e.type == SDL_CONTROLLERDEVICEADDED) SDL_GameControllerOpen(e.cdevice.which);
+            if (e.type == SDL_JOYDEVICEADDED) open_pad(e.jdevice.which);
             act = translate(&e);
+            // The first few raw events are the whole diagnosis when input seems dead: they say
+            // whether anything arrives at all, and on which API.
+            static int logged = 0;
+            if (logged < 20 && (e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_JOYBUTTONDOWN ||
+                                e.type == SDL_JOYHATMOTION || e.type == SDL_KEYDOWN)) {
+                fprintf(stderr, "[menu] input ev=0x%x act=%d\n", e.type, (int)act);
+                logged++;
+            }
         }
 
         if (screen == SCREEN_JOIN) beacon_poll(beacon_fd, hosts, &n_hosts);
