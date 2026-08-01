@@ -12,6 +12,32 @@ into: one unified app with Host/Join over LAN and game select.
 
 ---
 
+## Session 13c (2026-08-01, evening): Doom was never link-broken — its rip was truncated
+
+**The recorded "Doom hangs at LOADING whenever a link peer is connected" was wrong on both
+counts**, and it fell to a desktop repro in one afternoon (`547ac9d`, emulator `bf5ed689`):
+
+- The freeze reproduces **solo** — no link anywhere. Every screenshot of every condition (solo,
+  linked, DSR high/low, CTS high/low) was the byte-identical LOADING frame. The kernel log shows
+  the BIOS *re-loading the executable*: it is a **crash-reboot loop**, not a wait.
+- **PSX Doom (Europe) is an 8-track disc (1 data + 7 CD-audio); the library only ever held
+  Track 1**, and the generated single-track cue fed the game a TOC it could not live with.
+  With 7 silent stub tracks in the cue, Doom **boots to gameplay, linked pair included**
+  (demo mode runs on both instances with the SIO1 link up). CD music is silent until a complete
+  dump replaces the stubs. Deployed to Deck 1 (`roms/doom.cue` + `doom-silence.bin`);
+  `games.conf` flips Doom to ok. **The in-menu two-player link handshake is still untested** —
+  needs pads, i.e. The tester.
+- Fallout worth keeping: the emulator now implements the **DSR interrupt** (SIO_CTRL bit 12 —
+  the old constant aliased TXIRQEN and was never used; hardware-correct, proven inert for
+  Retaliation) and has env knobs `PCSX_SIO1_DSR_DEFAULT` / `PCSX_SIO1_CTS_DEFAULT` for the
+  line-idle defaults (historical high defaults stay — Retaliation's TX gates on the high CTS,
+  and two Doom line-level theories died by measurement in one afternoon).
+- **Deck 1 now runs binary `7d373d7f…`** (was `b73661eb…`) — md5-check against this when
+  comparing machines. Desktop instance configs now have the web surface on 6680/6681; the
+  screenshot endpoint + spaced-md5 comparison is the honest "is it progressing" instrument.
+
+---
+
 ## Session 13b (2026-08-01, same day): the unified app exists and is deployed
 
 **One Steam entry, "PS1 LAN Link", on both Decks** (`6a76879`): an SDL2 menu (gamepad + keyboard)
