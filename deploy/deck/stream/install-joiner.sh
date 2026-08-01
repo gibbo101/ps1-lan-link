@@ -6,15 +6,15 @@
 # the one that owns the game's files.
 #
 # Usage: install-joiner.sh <host> <host-address>
-#        install-joiner.sh deck2 10.0.0.1
+#        install-joiner.sh my-second-deck 192.168.1.50
 set -euo pipefail
 
-HOST="${1:-deck2}"
+HOST="${1:-}"
 HOST_ADDR="${2:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REMOTE=/home/deck/ps1-lan-link
 
-[ -n "$HOST_ADDR" ] || { echo "usage: $0 <ssh-host> <address-of-the-hosting-deck>"; exit 1; }
+[ -n "$HOST" ] && [ -n "$HOST_ADDR" ] || { echo "usage: $0 <ssh-host> <address-of-the-hosting-deck>"; exit 1; }
 echo "[joiner] host=$HOST  joining=$HOST_ADDR"
 
 # ffplay does the decoding and the fullscreen window. Without it there is nothing to install onto.

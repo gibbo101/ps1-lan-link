@@ -12,6 +12,35 @@ into: one unified app with Host/Join over LAN and game select.
 
 ---
 
+## Session 13d (2026-08-01, night): pre-public security review — PASSED with fixes
+
+Full-repo audit + git-history forensics ahead of going public (`f1e9847`, `0e103dc`):
+
+- **History is clean**: no BIOS/ROM blob was ever committed (largest objects are evidence
+  images); the 2026-07-25 password scrub held — every credential mention since is an explicit
+  redaction or placeholder. No key/token patterns anywhere in any patch.
+- **Both 0.0.0.0 debts paid**: the abandoned netpeer launcher now refuses its server role
+  without an explicit `BIND_ADDRESS` (a wide bind exposes the emulator control surface — RAM
+  and file read/write — and is an operator decision, never a default); `repro/run-server.sh`
+  defaults to loopback. `uvbind.h` verified in source: web/GDB/SIO1 listeners are loopback-only
+  unless `PCSX_BIND_ADDRESS` is deliberately set.
+- **Reproducibility hole found and closed**: `mediastream.cc/.h` (the export socket) and
+  `uvbind.h` (loopback confinement) were *untracked* in the gitignored emulator tree — present
+  in every binary, absent from every diff. Now committed in the fork and captured in
+  `patches/cumulative-vs-upstream-55fbf046.patch`, the single patch that rebuilds the shipping
+  binary from upstream `55fbf046`. Session patches remain as history only.
+- **Accepted / documented risks (home-LAN trust model, in README)**: the host's stream ports
+  are unauthenticated — anyone on the LAN can inject pad input (6691), hijack the single
+  stream slot (6690/6692), or spoof discovery beacons (6693); a joiner feeds
+  attacker-controllable h264 into libavcodec if it joins a hostile host. Future hardening:
+  first-client pinning and a join-confirmation showing the host address.
+- **Still the tester's call before flipping public**: license (README says unsettled), and the
+  personal-context question — "the tester" and machine hostnames (incl. `deck2`) appear
+  throughout HANDOVER/FINDINGS and their history; the installer no longer defaults to a
+  personal hostname. Scrubbing history again is possible but churns every hash.
+
+---
+
 ## Session 13c (2026-08-01, evening): Doom was never link-broken — its rip was truncated
 
 **The recorded "Doom hangs at LOADING whenever a link peer is connected" was wrong on both
