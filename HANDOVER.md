@@ -68,8 +68,17 @@ correct and the SPS/PPS handling difference is harmless.
   bespoke player. `HOST=192.168.0.104` still matches Deck 1's DHCP address on 2026-08-01. If the
   bespoke player misbehaves in play, backout is `PLAYER=ffplay` in `join.conf` — ffplay still works
   and the host-side fix alone removes most of the lag.
-- **Feel-test:** joiner menu responsiveness is the thing to test — it should now track the pad.
-  If it does, input lag is closed and the remaining joiner delta is ffplay-vs-bespoke polish.
+- **Feel-test: PASSED.** The tester confirmed in play on 2026-08-01: "input lag DEFEATED".
+- **Follow-on, same day: audio desync.** Once the picture got fast, the audio path became the
+  laggard — the tester heard menu blips and unit acks trailing the action. Measured on the live session:
+  aplay's ALSA buffer ran 8192 frames (~170 ms), the socat|aplay pipe holds up to ~370 ms of PCM,
+  and the startup backlog never drains because audio cannot skip. Fixed with
+  `stream/ps1-join-audio.py` (deployed to Deck 2, wired into `stream-join.sh` with socat|aplay as
+  fallback): owns the socket, starts playback at the live edge, runs aplay with a 50 ms buffer,
+  shrinks the pipe, and cuts accumulated drift in one frame-aligned drop, logged. Bench-verified:
+  800 ms startup backlog skipped, a 400 ms injected burst cut back under the 80 ms threshold in
+  three passes. Every cut must stay frame-aligned (4 bytes) or the channels phase-shift into
+  static. Awaiting the tester's in-play confirmation.
 - **Untouched:** the SIO1 stall asymmetry (instB ~87% in-game) and the session-12 instA deadlock.
   Two 2-minute single-instance headless runs on Deck 1 this session sat at menus without
   deadlocking, but that is not the repro condition (no link, no Game Mode).
