@@ -34,16 +34,10 @@ Full-repo audit + git-history forensics ahead of going public (`f1e9847`, `0e103
   stream slot (6690/6692), or spoof discovery beacons (6693); a joiner feeds
   attacker-controllable h264 into libavcodec if it joins a hostile host. Future hardening:
   first-client pinning and a join-confirmation showing the host address.
-- **Decided, deferred to a future session — the go-public checklist**:
-  1. **Scrub** (the tester approved 2026-08-01): replace `deck2`→`deck2`, `the tester`→neutral
-     phrasing, `the desktop PC`→"the desktop PC", `~`→`~`, in the working tree
-     AND full history (`git-filter-repo --replace-text`, not installed yet; case-sensitive
-     "the tester" does not collide with `lukegibson101`); rewrite author email to the GitHub noreply
-     form. Inventory is small: `deck2` in 1 tracked file / 15 history blobs, "the tester" in
-     3 files, paths in 2. `.claude/` is untracked — nothing leaks there. Force-push after;
-     every clone goes stale (only the desktop exists).
-  2. **License**: still the tester's pick (MIT matches the bundled fork).
-  3. Then flip visibility.
+- **Gone public (2026-10-01)**: personal names, the second Deck's hostname, the desktop's
+  hostname, home paths and the Steam ID were scrubbed from the working tree and the full history
+  (`git filter-repo --replace-text`); every commit carries the GitHub noreply address. License:
+  GPL-2.0-or-later (`COPYING`), matching PCSX-Redux's GPL-2.0. Then the repo was made public.
 
 ---
 
